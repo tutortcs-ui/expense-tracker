@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+.Python
+venv/
+env/
+
+# Data files - NEVER commit!
+*.xlsx
+*.xls
+*.csv
+data/
+*.log
+
+# Streamlit
+.streamlit/
+
+# Build files
+build/
+dist/
+*.spec
+*.exe
+*.bat
+launcher.py
+BUILD_GUIDE.md
+USER_README.txt
+STAGE2_GUIDE.md
+DISTRIBUTION_README.txt
+expense_tracker_FIXED.spec
+START_EXPENSE_TRACKER.bat
+config.toml
