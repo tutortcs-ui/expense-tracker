@@ -68,37 +68,127 @@ def load_and_process_statement(uploaded_file):
     Returns:
         DataFrame: Processed expense data with categories
     """
-    # Read Excel file
-    df = pd.read_excel(uploaded_file, header=10)
-    
-    # Clean data
-    df = df[df['Sl. No.'].notna()]
-    df = df[df['Sl. No.'].apply(lambda x: str(x).isdigit())]
-    
-    # Clean numeric columns
-    df['Withdrawal_Clean'] = df['Withdrawal'].apply(clean_numeric_value)
-    df['Deposit_Clean'] = df['Deposit'].apply(clean_numeric_value)
-    df['Value Date_Clean'] = df['Value Date'].apply(clean_date)
-    
-    # Filter only expenses (withdrawals)
-    expense_df = df[df['Withdrawal_Clean'] > 0].copy()
-    
-    # Categorize each transaction
-    expense_df['Category'] = expense_df.apply(
-        lambda row: categorize_transaction(row['Particulars'], row['Tran Type']),
-        axis=1
-    )
-    
-    # Create clean output dataframe
-    output_df = pd.DataFrame({
-        'Date': expense_df['Value Date_Clean'],
-        'Particulars': expense_df['Particulars'],
-        'Transaction Type': expense_df['Tran Type'],
-        'Category': expense_df['Category'],
-        'Amount': expense_df['Withdrawal_Clean']
-    })
-    
-    return output_df
+    try:
+        # Try to read Excel file - first attempt with header at row 10 (common Indian bank format)
+        try:
+            df = pd.read_excel(uploaded_file, header=10)
+        except:
+            # If that fails, try reading from row 0 (standard Excel)
+            df = pd.read_excel(uploaded_file, header=0)
+        
+        # Check if required columns exist
+        # Common column names across banks
+        date_col = None
+        particulars_col = None
+        withdrawal_col = None
+        deposit_col = None
+        
+        # Find date column
+        for col in df.columns:
+            if any(x in str(col).lower() for x in ['date', 'value date', 'transaction date']):
+                date_col = col
+                break
+        
+        # Find particulars/description column
+        for col in df.columns:
+            if any(x in str(col).lower() for x in ['particulars', 'description', 'narration', 'details', 'transaction details']):
+                particulars_col = col
+                break
+        
+        # Find withdrawal column
+        for col in df.columns:
+            if any(x in str(col).lower() for x in ['withdrawal', 'debit', 'paid', 'dr']):
+                withdrawal_col = col
+                break
+        
+        # Find deposit column  
+        for col in df.columns:
+            if any(x in str(col).lower() for x in ['deposit', 'credit', 'received', 'cr']):
+                deposit_col = col
+                break
+        
+        # Verify we found the essential columns
+        if not all([date_col, particulars_col, withdrawal_col]):
+            st.error(f"""
+            ❌ Could not identify required columns in your Excel file.
+            
+            **Required columns (with any of these names):**
+            - Date: 'Date', 'Value Date', 'Transaction Date'
+            - Description: 'Particulars', 'Description', 'Narration', 'Details'
+            - Withdrawals: 'Withdrawal', 'Debit', 'Paid', 'Dr'
+            
+            **Your file has these columns:**
+            {', '.join(df.columns.tolist())}
+            
+            **Please make sure your Excel file has standard bank statement columns.**
+            """)
+            return None
+        
+        # Clean data - remove rows where all essential columns are empty
+        df = df.dropna(subset=[date_col, particulars_col], how='all')
+        
+        # Filter only rows with actual transaction data
+        df = df[df[date_col].notna()]
+        
+        # Clean numeric columns
+        df['Withdrawal_Clean'] = df[withdrawal_col].apply(clean_numeric_value)
+        if deposit_col:
+            df['Deposit_Clean'] = df[deposit_col].apply(clean_numeric_value)
+        else:
+            df['Deposit_Clean'] = 0
+        
+        # Clean date column
+        df['Value Date_Clean'] = df[date_col].apply(clean_date)
+        
+        # Filter only expenses (withdrawals)
+        expense_df = df[df['Withdrawal_Clean'] > 0].copy()
+        
+        if len(expense_df) == 0:
+            st.warning("⚠️ No expense transactions found in the uploaded file.")
+            return None
+        
+        # Categorize each transaction
+        # Try to find transaction type column
+        tran_type_col = None
+        for col in df.columns:
+            if any(x in str(col).lower() for x in ['type', 'tran type', 'transaction type', 'mode']):
+                tran_type_col = col
+                break
+        
+        if tran_type_col:
+            expense_df['Category'] = expense_df.apply(
+                lambda row: categorize_transaction(row[particulars_col], row[tran_type_col]),
+                axis=1
+            )
+        else:
+            expense_df['Category'] = expense_df.apply(
+                lambda row: categorize_transaction(row[particulars_col], 'Unknown'),
+                axis=1
+            )
+        
+        # Create clean output dataframe
+        output_df = pd.DataFrame({
+            'Date': expense_df['Value Date_Clean'],
+            'Particulars': expense_df[particulars_col],
+            'Transaction Type': expense_df[tran_type_col] if tran_type_col else 'N/A',
+            'Category': expense_df['Category'],
+            'Amount': expense_df['Withdrawal_Clean']
+        })
+        
+        return output_df
+        
+    except Exception as e:
+        st.error(f"""
+        ❌ Error processing file: {str(e)}
+        
+        **Please make sure:**
+        - File is a valid Excel file (.xlsx or .xls)
+        - File contains bank transaction data
+        - File has columns for Date, Description, and Amount
+        
+        **If you continue to have issues, please contact support.**
+        """)
+        return None
 
 
 def save_processed_statement(df, filename):
@@ -212,8 +302,8 @@ st.title("💰 Expense Tracker")
 st.markdown("---")
 uploaded_file = st.file_uploader(
     "Upload Bank Statement (Excel)",
-    type=['xlsx'],
-    help="Upload your bank statement Excel file (OpTransactionHistory format)"
+    type=['xlsx', 'xls'],
+    help="Upload your bank statement Excel file. Supports most Indian bank formats."
 )
 
 if uploaded_file is not None:
@@ -223,7 +313,12 @@ if uploaded_file is not None:
             st.session_state.df = load_and_process_statement(uploaded_file)
             st.session_state.last_upload = uploaded_file.name
             st.session_state.edited_categories = {}
-        st.success(f"✅ Processed {len(st.session_state.df)} transactions")
+        
+        # Check if processing was successful
+        if st.session_state.df is not None:
+            st.success(f"✅ Processed {len(st.session_state.df)} transactions")
+        else:
+            st.error("❌ Failed to process file. Please check the format and try again.")
 
 # Only show tabs if data is loaded
 if st.session_state.df is not None:
