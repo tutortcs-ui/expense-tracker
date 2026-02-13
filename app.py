@@ -191,18 +191,9 @@ def load_and_process_statement(uploaded_file):
         return None
 
 
-def save_processed_statement(df, filename):
-    """
-    Save processed statement to data directory.
-    
-    Args:
-        df: Processed DataFrame
-        filename: Name for the saved file
-    """
-    filepath = DATA_DIR / filename
-    df.to_excel(filepath, index=False, engine='openpyxl')
-    return filepath
-
+# ============================================================================
+# STREAMLIT PAGE CONFIGURATION
+# ============================================================================
 
 def get_category_summary(df):
     """
@@ -227,7 +218,7 @@ def get_available_categories():
 
 
 # ============================================================================
-# STREAMLIT PAGE CONFIGURATION
+# STREAMLIT PAGE CONFIGURATION (ACTUAL)
 # ============================================================================
 
 st.set_page_config(
@@ -426,15 +417,32 @@ if st.session_state.df is not None:
         
         # Download section
         st.markdown("---")
+        st.subheader("💾 Save Your Work")
+        
         col1, col2 = st.columns([3, 1])
         
+        with col1:
+            st.write("Download your categorized transactions as an Excel file")
+        
         with col2:
-            # Save button
-            if st.button("💾 Save Processed File", type="primary"):
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"expenses_{timestamp}.xlsx"
-                filepath = save_processed_statement(df, filename)
-                st.success(f"✅ Saved to: {filepath}")
+            # Create Excel file in memory
+            from io import BytesIO
+            output = BytesIO()
+            df.to_excel(output, index=False, engine='openpyxl')
+            excel_data = output.getvalue()
+            
+            # Generate filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"expenses_{timestamp}.xlsx"
+            
+            # Download button
+            st.download_button(
+                label="📥 Download Excel",
+                data=excel_data,
+                file_name=filename,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary"
+            )
     
     
     # ========================================================================
