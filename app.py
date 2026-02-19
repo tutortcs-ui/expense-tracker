@@ -56,138 +56,200 @@ def generate_pdf_report(df, category_summary):
     
     with PdfPages(pdf_buffer) as pdf:
         # ====================================================================
-        # PAGE 1: SUMMARY + PIE CHART
+        # PAGE 1: SUMMARY + PIE CHART (Portrait)
         # ====================================================================
-        fig = plt.figure(figsize=(8.5, 11))  # Letter size
+        fig = plt.figure(figsize=(8.5, 11))  # Letter size portrait
+        fig.patch.set_facecolor('white')
         
-        # Title
-        fig.text(0.5, 0.95, '💰 EXPENSE REPORT', 
-                ha='center', fontsize=20, weight='bold')
+        # Title - Centered
+        fig.text(0.5, 0.96, '💰 EXPENSE REPORT', 
+                ha='center', fontsize=22, weight='bold')
         
-        # Date
+        # Date - Centered
         report_date = datetime.now().strftime('%B %d, %Y')
-        fig.text(0.5, 0.92, f'Generated on {report_date}',
-                ha='center', fontsize=10, style='italic', color='gray')
+        fig.text(0.5, 0.93, f'Generated on {report_date}',
+                ha='center', fontsize=11, style='italic', color='#666666')
         
-        # Summary Statistics
+        # Horizontal line
+        line1 = Rectangle((0.1, 0.915), 0.8, 0.002,
+                         transform=fig.transFigure, color='#CCCCCC')
+        fig.patches.append(line1)
+        
+        # Summary Statistics Box
+        summary_y = 0.88
+        fig.text(0.5, summary_y, 'SUMMARY', 
+                ha='center', fontsize=14, weight='bold')
+        
         total_spent = df['Amount'].sum()
         total_transactions = len(df)
         uncategorized = len(df[df['Category'] == 'Uncategorized'])
         avg_transaction = df['Amount'].mean()
         
-        summary_y = 0.85
-        fig.text(0.1, summary_y, 'SUMMARY', fontsize=14, weight='bold')
-        
-        summary_data = [
+        # Create a nice grid for summary - Values LEFT-aligned in a column
+        summary_items = [
             ('Total Spent', f'₹{total_spent:,.2f}'),
             ('Total Transactions', f'{total_transactions:,}'),
             ('Uncategorized Items', f'{uncategorized}'),
             ('Average Transaction', f'₹{avg_transaction:,.2f}'),
         ]
         
-        y_pos = summary_y - 0.05
-        for label, value in summary_data:
-            fig.text(0.12, y_pos, f'{label}:', fontsize=10)
-            fig.text(0.6, y_pos, value, fontsize=10, weight='bold')
-            y_pos -= 0.04
+        box_y = summary_y - 0.03
+        for label, value in summary_items:
+            # Light background box
+            box = Rectangle((0.15, box_y - 0.025), 0.7, 0.03,
+                          transform=fig.transFigure, 
+                          facecolor='#F5F5F5', edgecolor='#E0E0E0', linewidth=0.5)
+            fig.patches.append(box)
+            
+            # Label (left side)
+            fig.text(0.18, box_y, f'{label}:', fontsize=11, va='center', ha='left')
+            # Value (fixed position - LEFT ALIGNED from same starting point)
+            fig.text(0.55, box_y, value, fontsize=11, weight='bold', 
+                    ha='left', va='center')
+            box_y -= 0.04
         
-        # Pie Chart
-        ax_pie = fig.add_axes([0.1, 0.35, 0.8, 0.35])
+        # Pie Chart - Properly spaced from summary
+        ax_pie = fig.add_axes([0.15, 0.25, 0.7, 0.45])  # [left, bottom, width, height]
         
+        # Get colors
         colors = [CATEGORY_COLORS.get(cat, '#CCCCCC') for cat in category_summary['Category']]
         
+        # Create pie chart with better label positioning
         wedges, texts, autotexts = ax_pie.pie(
             category_summary['Total'],
-            labels=category_summary['Category'],
+            labels=None,  # Don't put labels on pie
             autopct='%1.1f%%',
             colors=colors,
-            startangle=90
+            startangle=90,
+            pctdistance=0.85
         )
         
-        for text in texts:
-            text.set_fontsize(9)
+        # Style percentage labels
         for autotext in autotexts:
             autotext.set_color('white')
-            autotext.set_fontsize(8)
+            autotext.set_fontsize(9)
             autotext.set_weight('bold')
         
-        ax_pie.set_title('Spending by Category', fontsize=12, weight='bold', pad=20)
+        # Add legend below the pie chart
+        ax_pie.legend(
+            category_summary['Category'],
+            loc='upper center',
+            bbox_to_anchor=(0.5, -0.05),
+            ncol=3,
+            frameon=False,
+            fontsize=9
+        )
+        
+        ax_pie.set_title('Spending by Category', 
+                        fontsize=13, weight='bold', pad=15)
         
         # Footer
-        fig.text(0.5, 0.05, 'Expense Tracker - Your Financial Insights',
-                ha='center', fontsize=8, style='italic', color='gray')
+        fig.text(0.5, 0.03, 'Expense Tracker - Your Financial Insights',
+                ha='center', fontsize=9, style='italic', color='#999999')
         
         pdf.savefig(fig, bbox_inches='tight')
         plt.close()
         
         # ====================================================================
-        # PAGE 2: BAR CHART + TABLE
+        # PAGE 2: BAR CHART + TABLE (Portrait - same as page 1)
         # ====================================================================
-        fig = plt.figure(figsize=(8.5, 11))
+        fig = plt.figure(figsize=(8.5, 11))  # Portrait orientation
+        fig.patch.set_facecolor('white')
         
-        # Bar Chart
-        ax_bar = fig.add_axes([0.15, 0.6, 0.75, 0.3])
+        # Page title
+        fig.text(0.5, 0.96, 'CATEGORY BREAKDOWN', 
+                ha='center', fontsize=18, weight='bold')
         
-        top_categories = category_summary.head(8)
+        # Horizontal line
+        line2 = Rectangle((0.1, 0.945), 0.8, 0.002,
+                         transform=fig.transFigure, color='#CCCCCC')
+        fig.patches.append(line2)
+        
+        # Bar Chart - Better positioned
+        ax_bar = fig.add_axes([0.2, 0.65, 0.7, 0.25])
+        
+        top_categories = category_summary.head(10)  # Show top 10
         colors_bar = [CATEGORY_COLORS.get(cat, '#CCCCCC') for cat in top_categories['Category']]
         
-        bars = ax_bar.barh(top_categories['Category'], top_categories['Total'], color=colors_bar)
-        ax_bar.set_xlabel('Amount (₹)', fontsize=10)
-        ax_bar.set_title('Top Spending Categories', fontsize=12, weight='bold', pad=15)
-        ax_bar.grid(axis='x', alpha=0.3)
+        bars = ax_bar.barh(range(len(top_categories)), top_categories['Total'], 
+                          color=colors_bar, height=0.7)
+        
+        # Set y-axis labels
+        ax_bar.set_yticks(range(len(top_categories)))
+        ax_bar.set_yticklabels(top_categories['Category'], fontsize=10)
+        ax_bar.invert_yaxis()  # Highest at top
+        
+        ax_bar.set_xlabel('Amount (₹)', fontsize=11, weight='bold')
+        ax_bar.set_title('Top Spending Categories', fontsize=13, weight='bold', pad=15)
+        ax_bar.grid(axis='x', alpha=0.3, linestyle='--', linewidth=0.5)
+        ax_bar.spines['top'].set_visible(False)
+        ax_bar.spines['right'].set_visible(False)
         
         # Add value labels on bars
-        for bar in bars:
+        for i, (bar, value) in enumerate(zip(bars, top_categories['Total'])):
             width = bar.get_width()
-            ax_bar.text(width, bar.get_y() + bar.get_height()/2,
-                       f'₹{width:,.0f}',
-                       ha='left', va='center', fontsize=8, weight='bold')
+            ax_bar.text(width + max(top_categories['Total'])*0.01, 
+                       i,
+                       f'₹{value:,.0f}',
+                       ha='left', va='center', fontsize=9, weight='bold')
         
-        # Category Breakdown Table
-        table_y = 0.5
-        fig.text(0.1, table_y, 'CATEGORY BREAKDOWN', fontsize=12, weight='bold')
+        # Category Breakdown Table - Well spaced
+        table_y = 0.58
+        fig.text(0.5, table_y, 'Detailed Breakdown', 
+                fontsize=12, weight='bold', ha='center')
         
-        # Table headers
-        headers = ['Category', 'Amount', 'Count', '%']
-        col_widths = [0.35, 0.25, 0.15, 0.15]
-        x_positions = [0.1, 0.45, 0.7, 0.85]
+        # Table with proper alignment
+        col_headers = ['Category', 'Amount', 'Count', 'Percentage']
+        col_x = [0.15, 0.45, 0.65, 0.78]
+        col_align = ['left', 'right', 'center', 'center']
         
         header_y = table_y - 0.04
-        for i, (header, x_pos) in enumerate(zip(headers, x_positions)):
-            fig.text(x_pos, header_y, header, fontsize=9, weight='bold')
         
-        # Horizontal line after header
-        line = Rectangle((0.1, header_y - 0.01), 0.8, 0.001, 
-                         transform=fig.transFigure, color='black')
-        fig.patches.append(line)
+        # Header background
+        header_box = Rectangle((0.12, header_y - 0.008), 0.76, 0.025,
+                              transform=fig.transFigure,
+                              facecolor='#E8E8E8', edgecolor='#999999', linewidth=0.5)
+        fig.patches.append(header_box)
         
-        # Table data
-        row_y = header_y - 0.04
-        for _, row in category_summary.iterrows():
-            if row_y < 0.15:  # Stop if we run out of space
+        # Headers
+        for i, (header, x_pos, align) in enumerate(zip(col_headers, col_x, col_align)):
+            fig.text(x_pos, header_y, header, fontsize=10, weight='bold', ha=align)
+        
+        # Table rows with alternating colors
+        row_y = header_y - 0.035
+        for idx, row in category_summary.iterrows():
+            if row_y < 0.12:  # Stop if running out of space
                 break
             
-            fig.text(x_positions[0], row_y, row['Category'], fontsize=8)
-            fig.text(x_positions[1], row_y, f"₹{row['Total']:,.2f}", fontsize=8)
-            fig.text(x_positions[2], row_y, f"{row['Count']}", fontsize=8)
-            fig.text(x_positions[3], row_y, f"{row['Percentage']}%", fontsize=8)
+            # Alternating row background
+            if idx % 2 == 0:
+                row_box = Rectangle((0.12, row_y - 0.008), 0.76, 0.025,
+                                   transform=fig.transFigure,
+                                   facecolor='#F9F9F9', edgecolor='none')
+                fig.patches.append(row_box)
+            
+            # Row data
+            fig.text(col_x[0], row_y, row['Category'], fontsize=9, ha='left')
+            fig.text(col_x[1], row_y, f"₹{row['Total']:,.2f}", fontsize=9, ha='right')
+            fig.text(col_x[2], row_y, f"{row['Count']}", fontsize=9, ha='center')
+            fig.text(col_x[3], row_y, f"{row['Percentage']}%", fontsize=9, ha='center')
             
             row_y -= 0.03
         
-        # Total row
-        line = Rectangle((0.1, row_y + 0.005), 0.8, 0.001,
-                        transform=fig.transFigure, color='black')
-        fig.patches.append(line)
+        # Total row with bold border
+        total_box = Rectangle((0.12, row_y - 0.008), 0.76, 0.025,
+                             transform=fig.transFigure,
+                             facecolor='#E8F5E9', edgecolor='#4CAF50', linewidth=1)
+        fig.patches.append(total_box)
         
-        row_y -= 0.02
-        fig.text(x_positions[0], row_y, 'TOTAL', fontsize=9, weight='bold')
-        fig.text(x_positions[1], row_y, f"₹{total_spent:,.2f}", fontsize=9, weight='bold')
-        fig.text(x_positions[2], row_y, f"{total_transactions}", fontsize=9, weight='bold')
-        fig.text(x_positions[3], row_y, "100%", fontsize=9, weight='bold')
+        fig.text(col_x[0], row_y, 'TOTAL', fontsize=10, weight='bold', ha='left')
+        fig.text(col_x[1], row_y, f"₹{total_spent:,.2f}", fontsize=10, weight='bold', ha='right')
+        fig.text(col_x[2], row_y, f"{total_transactions}", fontsize=10, weight='bold', ha='center')
+        fig.text(col_x[3], row_y, "100%", fontsize=10, weight='bold', ha='center')
         
         # Footer
-        fig.text(0.5, 0.05, 'Expense Tracker - Your Financial Insights',
-                ha='center', fontsize=8, style='italic', color='gray')
+        fig.text(0.5, 0.03, 'Expense Tracker - Your Financial Insights',
+                ha='center', fontsize=9, style='italic', color='#999999')
         
         pdf.savefig(fig, bbox_inches='tight')
         plt.close()
