@@ -288,133 +288,179 @@ CATEGORY_COLORS = {
 
 def load_and_process_statement(uploaded_file):
     """
-    Load bank statement and apply Stage 1 categorization.
-    
-    Args:
-        uploaded_file: Streamlit uploaded file object
-        
-    Returns:
-        DataFrame: Processed expense data with categories
+    Load bank statement from any Indian bank and extract only the 5 columns we need.
+
+    Strategy: Instead of assuming where the header row is or what the file looks like,
+    we SCAN every row until we find one that looks like a header (contains keywords
+    like 'date', 'particulars', 'withdrawal'). Then we extract ONLY those columns
+    and discard everything else — blank columns, bank info rows, junk rows, all gone.
+
+    This works across SBI, HDFC, Axis, Federal Bank, and most Indian bank formats.
     """
     try:
-        # Try to read Excel file - first attempt with header at row 10 (common Indian bank format)
-        try:
-            df = pd.read_excel(uploaded_file, header=10)
-        except:
-            # If that fails, try reading from row 0 (standard Excel)
-            df = pd.read_excel(uploaded_file, header=0)
-        
-        # Check if required columns exist
-        # Common column names across banks
-        date_col = None
-        particulars_col = None
-        withdrawal_col = None
-        deposit_col = None
-        
-        # Find date column
-        for col in df.columns:
-            if any(x in str(col).lower() for x in ['date', 'value date', 'transaction date']):
-                date_col = col
+        # ----------------------------------------------------------------
+        # Step 1: Read raw file with NO assumptions about structure
+        # Use xlrd engine for .xls files, openpyxl for .xlsx files
+        # ----------------------------------------------------------------
+        file_name = uploaded_file.name.lower()
+        if file_name.endswith('.xls'):
+            raw = pd.read_excel(uploaded_file, header=None, engine='xlrd')
+        else:
+            raw = pd.read_excel(uploaded_file, header=None, engine='openpyxl')
+
+        # ----------------------------------------------------------------
+        # Step 2: Scan rows to find the header row automatically
+        # We look for a row containing at least 3 of our expected keywords
+        # ----------------------------------------------------------------
+        COLUMN_KEYWORDS = {
+            'date':        ['value date', 'transaction date', 'txn date', 'date'],
+            'particulars': ['particulars', 'description', 'narration', 'details', 'transaction details'],
+            'tran_type':   ['tran type', 'transaction type', 'mode'],
+            'withdrawals': ['withdrawal', 'withdrawals', 'debit', 'paid', 'dr'],
+            'deposits':    ['deposit', 'deposits', 'credit', 'received', 'cr'],
+        }
+
+        header_row_index = None
+        for i, row in raw.iterrows():
+            # Convert all cell values in this row to lowercase strings for matching
+            row_values = [str(v).lower().strip() for v in row.values]
+            # Count how many of our 5 fields have a matching keyword in this row
+            matches = sum(
+                1 for keywords in COLUMN_KEYWORDS.values()
+                if any(kw in row_values for kw in keywords)
+            )
+            if matches >= 3:
+                header_row_index = i
                 break
-        
-        # Find particulars/description column
-        for col in df.columns:
-            if any(x in str(col).lower() for x in ['particulars', 'description', 'narration', 'details', 'transaction details']):
-                particulars_col = col
-                break
-        
-        # Find withdrawal column
-        for col in df.columns:
-            if any(x in str(col).lower() for x in ['withdrawal', 'debit', 'paid', 'dr']):
-                withdrawal_col = col
-                break
-        
-        # Find deposit column  
-        for col in df.columns:
-            if any(x in str(col).lower() for x in ['deposit', 'credit', 'received', 'cr']):
-                deposit_col = col
-                break
-        
-        # Verify we found the essential columns
-        if not all([date_col, particulars_col, withdrawal_col]):
+
+        if header_row_index is None:
             st.error(f"""
-            ❌ Could not identify required columns in your Excel file.
-            
-            **Required columns (with any of these names):**
-            - Date: 'Date', 'Value Date', 'Transaction Date'
-            - Description: 'Particulars', 'Description', 'Narration', 'Details'
-            - Withdrawals: 'Withdrawal', 'Debit', 'Paid', 'Dr'
-            
-            **Your file has these columns:**
-            {', '.join(df.columns.tolist())}
-            
-            **Please make sure your Excel file has standard bank statement columns.**
+            ❌ Could not find the header row in your file.
+
+            **Scanned:** {raw.shape[0]} rows × {raw.shape[1]} columns
+
+            **What we look for:** A row containing words like 'Date', 'Particulars',
+            'Withdrawal', 'Deposit', 'Narration', or 'Description'.
+
+            **First 5 rows of your file (for debugging):**
+            {raw.head(5).to_string()}
             """)
             return None
-        
-        # Clean data - remove rows where all essential columns are empty
-        df = df.dropna(subset=[date_col, particulars_col], how='all')
-        
-        # Filter only rows with actual transaction data
-        df = df[df[date_col].notna()]
-        
-        # Clean numeric columns
-        df['Withdrawal_Clean'] = df[withdrawal_col].apply(clean_numeric_value)
-        if deposit_col:
-            df['Deposit_Clean'] = df[deposit_col].apply(clean_numeric_value)
-        else:
-            df['Deposit_Clean'] = 0
-        
-        # Clean date column
-        df['Value Date_Clean'] = df[date_col].apply(clean_date)
-        
-        # Filter only expenses (withdrawals)
-        expense_df = df[df['Withdrawal_Clean'] > 0].copy()
-        
-        if len(expense_df) == 0:
-            st.warning("⚠️ No expense transactions found in the uploaded file.")
+
+        # ----------------------------------------------------------------
+        # Step 3: Map each field to its exact column index in the file
+        # We use the header row to find where each column lives
+        # ----------------------------------------------------------------
+        header_values = [str(v).lower().strip() for v in raw.iloc[header_row_index].values]
+        col_map = {}
+
+        for field, keywords in COLUMN_KEYWORDS.items():
+            for kw in keywords:
+                if kw in header_values:
+                    col_map[field] = header_values.index(kw)
+                    break  # Take the first match and stop
+
+        # Date and Particulars are the minimum we need to continue
+        if 'date' not in col_map or 'particulars' not in col_map:
+            st.error(f"""
+            ❌ Found header row at row {header_row_index}, but could not locate
+            Date or Particulars columns.
+
+            **Columns found in that row:**
+            {', '.join(str(v) for v in raw.iloc[header_row_index].values if str(v) != 'nan')}
+            """)
             return None
-        
-        # Categorize each transaction
-        # Try to find transaction type column
-        tran_type_col = None
-        for col in df.columns:
-            if any(x in str(col).lower() for x in ['type', 'tran type', 'transaction type', 'mode']):
-                tran_type_col = col
-                break
-        
-        if tran_type_col:
-            expense_df['Category'] = expense_df.apply(
-                lambda row: categorize_transaction(row[particulars_col], row[tran_type_col]),
-                axis=1
-            )
-        else:
-            expense_df['Category'] = expense_df.apply(
-                lambda row: categorize_transaction(row[particulars_col], 'Unknown'),
-                axis=1
-            )
-        
-        # Create clean output dataframe
-        output_df = pd.DataFrame({
-            'Date': expense_df['Value Date_Clean'],
-            'Particulars': expense_df[particulars_col],
-            'Transaction Type': expense_df[tran_type_col] if tran_type_col else 'N/A',
-            'Category': expense_df['Category'],
-            'Amount': expense_df['Withdrawal_Clean']
+
+        if 'withdrawals' not in col_map:
+            st.error(f"""
+            ❌ Could not find a Withdrawal/Debit column in your file.
+
+            **Columns found:** {', '.join(str(v) for v in raw.iloc[header_row_index].values if str(v) != 'nan')}
+
+            **Expected one of:** Withdrawal, Withdrawals, Debit, Paid, Dr
+            """)
+            return None
+
+        # ----------------------------------------------------------------
+        # Step 4: Extract ONLY the rows and columns we need
+        # Skip the header row itself — data starts on the next row
+        # ----------------------------------------------------------------
+        data = raw.iloc[header_row_index + 1:].copy()
+
+        # Remove rows where Date or Particulars is empty — those are blank/footer rows
+        data = data[data.iloc[:, col_map['date']].notna()]
+        data = data[data.iloc[:, col_map['particulars']].notna()]
+
+        if len(data) == 0:
+            st.warning("⚠️ No transaction rows found after the header row.")
+            return None
+
+        # ----------------------------------------------------------------
+        # Step 5: Clean amounts — strip commas, convert to float
+        # e.g. "1,999.00" → 1999.0, blank → 0.0
+        # ----------------------------------------------------------------
+        def clean_amount(val):
+            """Convert a bank amount string like '1,999.00' to float 1999.0"""
+            if pd.isna(val) or str(val).strip() in ['', 'nan']:
+                return 0.0
+            try:
+                return float(str(val).replace(',', '').strip())
+            except:
+                return 0.0
+
+        def clean_date_val(val):
+            """Parse date strings like '01/03/2026' into proper date objects"""
+            try:
+                return pd.to_datetime(str(val), dayfirst=True)
+            except:
+                return pd.NaT
+
+        # ----------------------------------------------------------------
+        # Step 6: Build the clean 5-column DataFrame
+        # This is all we pass to the rest of the app — no junk columns
+        # ----------------------------------------------------------------
+        clean_data = pd.DataFrame({
+            'Date': [clean_date_val(v) for v in data.iloc[:, col_map['date']]],
+            'Particulars': [str(v) for v in data.iloc[:, col_map['particulars']]],
+            'Tran Type': (
+                [str(v) for v in data.iloc[:, col_map['tran_type']]]
+                if 'tran_type' in col_map else ['N/A'] * len(data)
+            ),
+            'Withdrawals': [clean_amount(v) for v in data.iloc[:, col_map['withdrawals']]],
+            'Deposits': (
+                [clean_amount(v) for v in data.iloc[:, col_map['deposits']]]
+                if 'deposits' in col_map else [0.0] * len(data)
+            ),
         })
-        
-        return output_df
-        
+
+        # ----------------------------------------------------------------
+        # Step 7: Keep only expense rows (withdrawals > 0)
+        # Then categorize each one using the Stage 1 logic
+        # ----------------------------------------------------------------
+        expense_df = clean_data[clean_data['Withdrawals'] > 0].copy()
+
+        if len(expense_df) == 0:
+            st.warning("⚠️ No withdrawal transactions found in this file.")
+            return None
+
+        expense_df['Category'] = expense_df.apply(
+            lambda row: categorize_transaction(row['Particulars'], row['Tran Type']),
+            axis=1
+        )
+
+        # Rename Withdrawals → Amount for consistency with rest of app
+        expense_df = expense_df.rename(columns={'Withdrawals': 'Amount', 'Tran Type': 'Transaction Type'})
+
+        return expense_df[['Date', 'Particulars', 'Transaction Type', 'Category', 'Amount']]
+
     except Exception as e:
         st.error(f"""
         ❌ Error processing file: {str(e)}
-        
+
         **Please make sure:**
         - File is a valid Excel file (.xlsx or .xls)
-        - File contains bank transaction data
-        - File has columns for Date, Description, and Amount
-        
-        **If you continue to have issues, please contact support.**
+        - File is a bank statement with transaction data
+        - File has columns for Date, Description/Particulars, and Withdrawal/Debit amounts
         """)
         return None
 
@@ -480,7 +526,7 @@ st.markdown("""
     h1 {
         font-weight: 600;
         margin-bottom: 2rem;
-    }
+    }+
     
     h2 {
         font-weight: 500;
