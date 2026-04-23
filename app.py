@@ -626,17 +626,18 @@ for key, default in {
 # ============================================================================
 
 query_params = st.query_params
-if "code" in query_params and st.session_state.credentials is None:
+if "code" in query_params:
     code = query_params["code"]
-    with st.spinner("Completing login..."):
-        creds = exchange_code_for_credentials(code)
-        if creds:
-            st.session_state.credentials   = credentials_to_dict(creds)
-            st.session_state.user_info     = get_user_info(creds)
-            service = get_drive_service(creds)
-            st.session_state.personal_rules = load_rules_from_drive(service)
-            n = len(st.session_state.personal_rules)
-            st.success(f"Logged in! Loaded {n} personal rule{'s' if n != 1 else ''}.")
+    if st.session_state.credentials is None:
+        with st.spinner("Completing login..."):
+            creds = exchange_code_for_credentials(code)
+            if creds:
+                st.session_state.credentials   = credentials_to_dict(creds)
+                st.session_state.user_info     = get_user_info(creds)
+                service = get_drive_service(creds)
+                st.session_state.personal_rules = load_rules_from_drive(service)
+                n = len(st.session_state.personal_rules)
+                st.success(f"Logged in! Loaded {n} personal rule{'s' if n != 1 else ''}.")
     st.query_params.clear()
     st.rerun()
 
