@@ -77,8 +77,9 @@ MCC_CATEGORY_MAP = {
 CATEGORY_KEYWORDS = {
 
     'Rent': [
-        'rent', 'kmc', 'kolkata municipal', 'municipality',
-        'maintenance', 'society', 'landlord',
+        'rent', 'landlord',
+        'kmc', 'kolkata municipal', 'municipality',
+        'maintenance', 'society',
     ],
 
     'Family': [
@@ -147,9 +148,8 @@ CATEGORY_KEYWORDS = {
         'mobile', 'mobi', 'phone', 'phon',
         'dth', 'airtel', 'jio', 'bsnl', 'vodafone',
         'internet', 'postpaid', 'prepaid',
-        # Device repair and purchases
+        # Device repair and purchases — only digital/phone devices
         'phone repair', 'mobile repair', 'screen repair',
-        'repair', 'repai',
         'laptop', 'tablet', 'headphone', 'charger', 'cable',
         'device', 'gadget', 'hostinger',
         # Bank charges absorbed here
@@ -181,14 +181,18 @@ CATEGORY_KEYWORDS = {
         'cloth', 'clothes', 'clothing', 'shirt', 'pant', 'pants',
         'trouser', 'saree', 'kurta', 'dress', 'fashion',
         'garment', 'textile', 'tailor', 'stitching',
-        # Home
+        # Home and utilities
         'fan cov', 'fan', 'cutlery', 'soap', 'detergent',
         'utensil', 'kitchen', 'vessel', 'broom', 'mop',
         'bucket', 'household', 'furniture', 'mattress',
         'pillow', 'bedsheet', 'curtain', 'mug', 'bottle',
         'gas ', 'cylinder', 'lpg',
         'electricity', 'water bill', 'wifi', 'broadband',
-        'post of',
+        'post of', 'kmc', 'kolkata municipal', 'municipality',
+        'maintenance', 'society',
+        # Repairs (non-device)
+        'bag repai', 'bag repair', 'bike repair', 'biie repa',
+        'repair', 'repai',
         # Shopping
         'flipkart', 'flip kart', 'meesho', 'raz*meesho',
         'myntra', 'nykaa', 'ajio', 'snapdeal', 'shopsy',
@@ -363,9 +367,17 @@ def categorize_transaction(particulars, tran_type='Unknown', amount=0):
         if fuzzy:
             return fuzzy
 
-    # ── 5. MCC code lookup ────────────────────────────────────────────────────
+    # ── 5. MCC code lookup — only when note gave no signal ───────────────────
+    # If note was present but matched nothing, MCC is next best signal.
+    # Exception: if note is 'sent', 'u', 'upi' etc. AND merchant is paytm transfer
+    # then MCC 4814 (telecom) is misleading — skip it.
     mcc = _extract_mcc(text)
-    if mcc and mcc in MCC_CATEGORY_MAP and MCC_CATEGORY_MAP[mcc] is not None:
+    skip_mcc = (
+        mcc == '4814' and
+        note in _USELESS_NOTES and
+        'paytm-8746350' in text  # known generic money-sender, not telecom
+    )
+    if not skip_mcc and mcc and mcc in MCC_CATEGORY_MAP and MCC_CATEGORY_MAP[mcc] is not None:
         if mcc != '0000':
             return MCC_CATEGORY_MAP[mcc]
 
