@@ -2,9 +2,11 @@ streamlit
 pandas
 plotly
 openpyxl
+xlrd
 matplotlib
 google-auth
 google-auth-oauthlib
 google-auth-httplib2
 google-api-python-client
 requests
+streamlit-google-auth
