@@ -84,11 +84,11 @@ CATEGORY_COLORS = {
 # We build it from Streamlit secrets and write it to a temp file.
 # ============================================================================
 
-@st.cache_resource
 def get_auth_object():
     """
-    Create the Google Auth object once and cache it.
+    Create the Google Auth object each run.
     Writes credentials to a temp JSON file that streamlit-google-auth can read.
+    Cannot be cached because it contains a Streamlit widget (cookie manager).
     """
     creds_dict = {
         "web": {
@@ -481,6 +481,10 @@ for key, default in {
     "edited_categories": {},
     "personal_rules":    {},
     "rules_loaded":      False,
+    "connected":         False,
+    "oauth_token":       None,
+    "name":              None,
+    "email":             None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
