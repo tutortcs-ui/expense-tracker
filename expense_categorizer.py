@@ -1,736 +1,405 @@
 """
-EXPENSE CATEGORIZER - STAGE 1 (ITERATION 3)
-============================================
-This script reads bank transaction files and categorizes expenses automatically.
+EXPENSE CATEGORIZER
+====================
+Categorizes Indian bank UPI/NEFT/ATM transactions from Indian bank statements.
 
-IMPROVEMENTS IN ITERATION 3:
-- Expanded MCC code database from 60 to 100+ codes
-- Added Air India, IndiGo, Amazon, Growth School merchant recognition
-- Improved Travel category (airlines, hotels, travel agencies)
-- Better Books/Education categorization
-- Reduced Uncategorized from 13% → 10.6%
+Three-layer approach (in order of priority):
+1. Exact + fuzzy keyword match on the UPI note (human-written, most reliable)
+2. MCC code lookup (merchant category set by bank)
+3. Full text keyword scan (UPI IDs, merchant patterns)
+4. Fallback rules (personal UPI + small amount = Food, ATM = cash category)
 
-CUMULATIVE IMPROVEMENTS (All Iterations):
-- Smart UPI transaction parsing (extracts merchant codes and handles)
-- Merchant Category Code (MCC) mapping for better auto-categorization
-- Pattern recognition for common UPI payment gateways
-- Reduced "Uncategorized" and "Miscellaneous" by 18% (from 46% → 43.4%)
-
-INPUT: Bank statement Excel file (OpTransactionHistory format)
-OUTPUT: Categorized expense Excel file with summary
-
-Author: Built for expense tracking automation
+All matching is case-insensitive.
 """
 
-import pandas as pd
 import re
-from datetime import datetime
+from difflib import get_close_matches
 
 
 # ============================================================================
-# MERCHANT CATEGORY CODE (MCC) MAPPING
+# MCC CODE MAP
+# 4-digit merchant category codes at the end of UPI strings e.g. /5411
 # ============================================================================
-# These 4-digit codes (like 5411, 5812) tell us what type of merchant it is
-# Banks include these in UPI transactions but don't explain them
-# Reference: ISO 18245 standard merchant category codes
 
-MCC_CATEGORIES = {
-    # FOOD & GROCERY
-    '5411': 'Food',  # Grocery stores
-    '5422': 'Food',  # Meat markets
-    '5441': 'Food',  # Candy, nut, confectionery stores
-    '5451': 'Food',  # Dairy products stores
-    '5462': 'Food',  # Bakeries
-    '5499': 'Food',  # Miscellaneous food stores
-    '5812': 'Food',  # Eating places, restaurants
-    '5814': 'Food',  # Fast food restaurants
-    
-    # TRAVEL & TRANSPORTATION
-    '3020': 'Travel',  # Air carriers, airlines (Air India)
-    '4112': 'Travel',  # Passenger railways
-    '4121': 'Travel',  # Taxicabs and limousines
-    '4131': 'Travel',  # Bus lines
-    '4511': 'Travel',  # Airlines
-    '4722': 'Travel',  # Travel agencies (IndiGo, MakeMyTrip)
-    '4784': 'Travel',  # Toll bridges, fees
-    '5541': 'Travel',  # Service stations (gas/petrol)
-    '5542': 'Travel',  # Automated fuel dispensers
-    '7011': 'Travel',  # Hotels, motels, resorts
-    '7511': 'Travel',  # Truck/car rental
-    '7523': 'Travel',  # Parking lots, garages
-    
-    # MEDICAL & HEALTH
-    '5912': 'Medical',  # Drug stores, pharmacies
-    '5975': 'Medical',  # Hearing aids
-    '5976': 'Medical',  # Orthopedic goods, prosthetics
-    '8011': 'Medical',  # Doctors, physicians
-    '8021': 'Medical',  # Dentists, orthodontists
-    '8031': 'Medical',  # Osteopaths
-    '8041': 'Medical',  # Chiropractors
-    '8042': 'Medical',  # Optometrists, ophthalmologists
-    '8049': 'Medical',  # Podiatrists, chiropodists
-    '8050': 'Medical',  # Nursing, personal care facilities
-    '8062': 'Medical',  # Hospitals
-    '8071': 'Medical',  # Medical and dental laboratories
-    
-    # EDUCATION & BOOKS
-    '5192': 'Books',  # Books, periodicals, newspapers
-    '5262': 'Books',  # Marketplaces, stationery, office supplies (Amazon books)
-    '5942': 'Books',  # Book stores
-    '5943': 'Books',  # Stationery, office supplies
-    '5994': 'Books',  # News dealers, newsstands
-    '8211': 'Books',  # Elementary, secondary schools
-    '8220': 'Books',  # Colleges, universities
-    '8241': 'Books',  # Schools, correspondence, online education (Growth School)
-    '8244': 'Books',  # Schools, trade, vocational
-    
-    # CLOTHING
-    '5611': 'Clothes',  # Men's and boys' clothing
-    '5621': 'Clothes',  # Women's ready-to-wear
-    '5631': 'Clothes',  # Women's accessory, specialty
-    '5641': 'Clothes',  # Children's clothing
-    '5651': 'Clothes',  # Family clothing stores
-    '5655': 'Clothes',  # Sports apparel
-    '5661': 'Clothes',  # Shoe stores
-    '5691': 'Clothes',  # Men's and women's clothing
-    
-    # HOME & GARDEN
-    '5193': 'Garden',  # Florists
-    '5261': 'Garden',  # Nurseries, lawn/garden supply
-    '5712': 'Miscellaneous',  # Furniture, home furnishings (household items)
-    '5713': 'Miscellaneous',  # Floor covering stores
-    '5714': 'Miscellaneous',  # Drapery, window covering
-    '5718': 'Miscellaneous',  # Fireplace, fireplace screens
-    '5719': 'Miscellaneous',  # Miscellaneous home furnishing stores
-    
-    # UTILITIES & SERVICES
-    '4900': 'Miscellaneous',  # Utilities (electric, gas, water)
-    '4814': 'Miscellaneous',  # Telecom equipment/services
-    '4816': 'Miscellaneous',  # Computer network services
-    '4899': 'Miscellaneous',  # Cable, satellite, other services
-    
-    # ENTERTAINMENT & SUBSCRIPTIONS
-    '5732': 'Tools',  # Electronics stores
-    '5734': 'Tools',  # Computer software stores
-    '5815': 'Miscellaneous',  # Digital goods - media, books, movies
-    '5816': 'Tools',  # Digital goods - games
-    '5817': 'Tools',  # Digital goods - applications
-    '5818': 'Tools',  # Digital goods - large digital goods
-    '7832': 'Miscellaneous',  # Motion picture theaters
-    '7841': 'Miscellaneous',  # Video entertainment rental
-    
-    # GENERAL RETAIL
-    '5200': 'Miscellaneous',  # Home supply warehouse
-    '5300': 'Miscellaneous',  # Wholesale clubs
-    '5331': 'Miscellaneous',  # Variety stores (general merchandise)
-    '5399': 'Miscellaneous',  # Miscellaneous general merchandise
-    '5947': 'Miscellaneous',  # Gift, card, novelty, souvenir shops
-    '5993': 'Miscellaneous',  # Cigar stores, tobacco shops
-    '5999': 'Miscellaneous',  # Miscellaneous specialty retail
-    
-    # FINANCIAL SERVICES
-    '6010': 'Miscellaneous',  # Financial institutions (ATM fees)
-    '6011': 'Miscellaneous',  # ATM charges
-    '6012': 'Miscellaneous',  # Financial institutions
-    '6051': 'Miscellaneous',  # Non-financial institutions
-    
-    # PROFESSIONAL SERVICES
-    '7210': 'Miscellaneous',  # Laundry, cleaning services
-    '7211': 'Miscellaneous',  # Laundries - family, commercial
-    '7216': 'Miscellaneous',  # Dry cleaners
-    '7217': 'Miscellaneous',  # Carpet, upholstery cleaning
-    '7230': 'Miscellaneous',  # Barber and beauty shops
-    '7299': 'Miscellaneous',  # Miscellaneous personal services
-    '7392': 'Miscellaneous',  # Management, consulting services
-    '7399': 'Miscellaneous',  # Business services
-    '7829': 'Miscellaneous',  # Motion pictures, video production
-    '8299': 'Miscellaneous',  # Schools and educational services
-    '8398': 'Miscellaneous',  # Charitable organizations
-    '8641': 'Miscellaneous',  # Civic, social, fraternal associations
-    '8651': 'Miscellaneous',  # Political organizations
-    '8661': 'Miscellaneous',  # Religious organizations
-    '8675': 'Miscellaneous',  # Automobile associations
-    '8699': 'Miscellaneous',  # Membership organizations
-    '8999': 'Miscellaneous',  # Professional services
-    '9211': 'Miscellaneous',  # Court costs, fines
-    '9222': 'Miscellaneous',  # Fines - government
-    '9311': 'Miscellaneous',  # Tax payments
-    '9399': 'Miscellaneous',  # Government services
-    '9402': 'Miscellaneous',  # Postal services
-    '9405': 'Miscellaneous',  # Government services
-    
-    # CATCH-ALL FOR UNKNOWN CODES
-    '0000': 'Miscellaneous',  # Person-to-person payments (Paytm, GPay P2P)
+MCC_CATEGORY_MAP = {
+    '5411': 'Food',          # Grocery stores
+    '5412': 'Food',
+    '5441': 'Food',          # Candy / confectionery
+    '5451': 'Food',          # Dairy products
+    '5499': 'Food',          # Misc food stores
+    '5812': 'Food',          # Eating places / restaurants
+    '5814': 'Food',          # Fast food
+    '5462': 'Food',          # Bakeries
+    '5912': 'Medical',       # Drug stores / pharmacies
+    '8011': 'Medical',       # Doctors
+    '8062': 'Medical',       # Hospitals
+    '8099': 'Medical',       # Health practitioners
+    '8071': 'Medical',       # Health clubs / fitness
+    '5942': 'Books',         # Book stores
+    '8299': 'Books',         # Schools / educational
+    '5310': 'Shopping',      # Discount stores
+    '5311': 'Shopping',      # Department stores
+    '5993': 'Shopping',      # Misc retail
+    '5817': 'Subscriptions', # Digital goods / software
+    '4112': 'Travel',        # Passenger railways
+    '4784': 'Travel',        # Tolls / road fees
+    '4814': 'Recharge',      # Telecom
+    '5331': 'Home',          # Variety stores
+    '5211': 'Home',          # Hardware stores
+    '5947': 'Home',          # Gift / novelty shops
+    '9402': 'Home',          # Postal services
+    '7549': 'Tools',         # Towing / auto repair
+    '9399': 'Travel',        # Government / postal
+    '5262': 'Shopping',      # Women's clothing (Amazon generic MCC)
+    '7538': 'Travel',        # Auto service
+    '5942': 'Books',
+    '0000': None,            # No MCC — rely on keyword matching
 }
 
 
 # ============================================================================
-# UPI HANDLE PATTERNS
+# CATEGORY KEYWORD LISTS
+# More specific categories are listed first.
+# Within each list, more specific phrases are listed before general words.
 # ============================================================================
-# Common UPI handles and what they typically represent
-
-UPI_HANDLE_CATEGORIES = {
-    # FOOD DELIVERY & RESTAURANTS
-    'swiggy': 'Food',
-    'zomato': 'Food',
-    'dunzo': 'Food',
-    
-    # PAYMENT GATEWAY MERCHANTS (rely on MCC for categorization)
-    'paytmqr': 'Miscellaneous',  # Paytm QR - could be anything, needs MCC
-    'razorpay': 'Miscellaneous',  # Razorpay - could be anything, needs MCC
-    'phonepe.merchant': 'Miscellaneous',  # PhonePe merchant - needs MCC
-    'bharatpe': 'Miscellaneous',  # BharatPe - needs MCC
-    
-    # TRAVEL
-    'irctc': 'Travel',  # Railway tickets
-    'uber': 'Travel',
-    'ola': 'Travel',
-    'rapido': 'Travel',
-    'goindigo': 'Travel',  # IndiGo airlines
-    'indigo': 'Travel',  # IndiGo airlines (alternate)
-    'airindia': 'Travel',  # Air India
-    'makemytrip': 'Travel',  # MakeMyTrip
-    
-    # SHOPPING & ECOMMERCE
-    'amazon': 'Miscellaneous',  # Amazon - could be anything (books, electronics, etc.)
-    'amazonupi': 'Miscellaneous',  # Amazon UPI payments
-    'flipkart': 'Miscellaneous',  # Flipkart - could be anything
-    
-    # EDUCATION & COURSES
-    'growthschool': 'Books',  # Growth School - online courses
-    
-    # GOVERNMENT & SERVICES
-    'npci': 'Miscellaneous',  # Government payments
-    'bhim': 'Miscellaneous',  # Government UPI app
-}
-
-
-# ============================================================================
-# CONFIGURATION: CATEGORY KEYWORDS (LEGACY - STILL USED)
-# ============================================================================
-# Each category has a list of keywords to match in transaction descriptions
-# Keywords are matched case-insensitively and can appear anywhere in the text
 
 CATEGORY_KEYWORDS = {
-    'Food': [
-        'grocery', 'food', 'fruit', 'veg', 'egg', 'banana', 'sweet', 'rice', 
-        'ruti', 'daab', 'dhosa', 'curd', 'paan', 'chanc', 'water', 'restaurant', 
-        'swiggy', 'zomato', 'sweets', 'dhowa', 'ruit', 'groce', 'cutlet', 
-        'chop', 'pastur', 'meat', 'fish', 'milk', 'bread', 'atta', 'oil',
-        'fuits',  # Common spelling error for fruits
-    ],
-    
-    'Travel': [
-        'railway', 'train', 'bus', 'uber', 'ola', 'metro', 'cab', 'taxi', 
-        'toll', 'transport', 'car', 'auto', 'petrol', 'diesel', 'fuel',
-        'rapido', 'indian railway', 'caterin', 'irctc', 'trai',
-    ],
-    
-    'Medical': [
-        'medicine', 'doctor', 'hospital', 'clinic', 'pharmacy', 'apollo', 
-        'health', 'medical', 'durga maternity', 'dr ', 'dr/', 'chemist', 'tablet',
-        'injection', 'test', 'pathology',
-    ],
-    
-    'Books': [
-        'book', 'notebook', 'stationery', 'pen', 'pencil', 'paper',
-        'educational', 'study',
-    ],
-    
-    'Tools': [
-        'playstore', 'app', 'software', 'tool', 'google play', 'subscription',
-        'netflix', 'spotify', 'prime', 'youtube',
-        'manda/'  # Playstore mandate pattern
-    ],
-    
-    'Garden': [
-        'garden', 'plant', 'seed', 'farm', 'nursery', 'manure', 'fertilizer',
-        'sapling', 'pot', 'soil', 'poants',  # Spelling error for plants
-    ],
-    
-    'Rent': [
-        'rent', 'house rent', 'room rent'
-    ],
-    
-    'Clothes': [
-        'cloth', 'shirt', 'pant', 'dress', 'garment', 'jacket', 'shoe',
-        'footwear', 'saree', 'kurta', 'trouser',
-    ],
-    
+
     'Priyanka': [
-        'priyanka'
+        'priyanka',
     ],
-    
-    'Miscellaneous': [
-        'recharge', 'gpayrecharge', 'fan', 'wage', 'cutlery', 'soap',
-        'atm', 'mob alert', 'mobile', 'verif', 'charges', 'chrg',
-    ]
+
+    'Bank Charges': [
+        'chrg/mob', 'mob alert', 'sms alert', 'bank charge',
+        'service charge', 'annual charge', 'processing fee', 'chrg/',
+    ],
+
+    'Rent': [
+        'rent', 'kmc', 'kolkata municipal', 'municipality',
+        'maintenance', 'society', 'landlord',
+    ],
+
+    'Medical': [
+        'medical', 'medicine', 'medicines', 'pharmacy', 'chemist',
+        'hospital', 'clinic', 'maternity', 'nursing home',
+        'doctor', 'dr.', '/dr', 'drpur', 'dpcto',
+        'scan doct', 'scan doc', 'pathology', 'lab test',
+        'apollo', 'fortis', 'mosquito', 'sanitizer',
+        'pastur',   # Pastur = scan centre name, not milk
+    ],
+
+    'Food': [
+        # Bengali foods
+        'ruti', 'ruit', 'dhosa', 'dhowa', 'lassi', 'malpoa',
+        'paan', 'chop',
+        # Common food words
+        'food', 'grocery', 'groceries', 'groce',
+        'vegetable', 'veg', 'sabzi',
+        'fruit', 'fruits', 'banana',
+        'rice', 'fish', 'meat', 'chicken', 'mutton', 'egg',
+        'milk', 'bread', 'curd', 'paneer',
+        'snack', 'snacks', 'biscuit',
+        'sweet', 'sweets', 'swets', 'mithai',
+        'kulfi', 'kulf', 'ice cream', 'icecream', 'icecre',
+        'daab', 'coconut', 'cocon',
+        'water',
+        'restaurant', 'hotel', 'cafe', 'tiffin',
+        'lunch', 'dinner', 'breakfast',
+        'biryani', 'pizza', 'burger',
+        'swiggy', 'zomato', 'blinkit', 'zepto', 'dunzo',
+        'refill',
+        # Merchant UPI IDs seen in data
+        'paytmqr6r1d2z', 'paytmqr6wz4mo', 'paytmqr6qllxp',
+        'paytmqr6vyzn5', 'paytmqr6hkyi6', 'paytmqr726h5n',
+        'q983545028', 'q982324791', 'q222457382', 'q544422605',
+        'q491850880', 'q306274145', 'q81684614', 'q017048568',
+        'q353324462', 'q344093743', 'q190021426', 'q348173810',
+        'q467936681', 'q903203103', 'q974257537', 'q024080582',
+        'q060338555', 'q505344652', 'q244567670', 'q506824648',
+        'q669543068', 'gpay-12190525019', 'gpay-11244605008',
+        'paytm.s10lez0', 'paytm.s1p3egp',
+        'hoogafarmspriva', 'ppqr01.rldijp',
+    ],
+
+    'Travel': [
+        'travel', 'trave', 'train', 'trai', 'railway', 'irctc',
+        'metro', 'bus', 'taxi', 'cab', 'ola', 'uber', 'rapido',
+        'petrol', 'fuel', 'diesel', 'parking', 'toll',
+        'airport', 'flight', 'redbus', 'makemytrip', 'goibibo',
+        'bike', 'car',
+        'bdpg.iruts', 'bdpg2.iruts',
+        'paytm-8727353',
+        'gorangadas',
+        'paytm.s1g5axt',
+    ],
+
+    'Books': [
+        'book', 'books', 'notebook', 'stationery',
+        'study', 'course', 'education', 'tuition', 'coaching',
+        'udemy', 'coursera', 'yssofindia',
+    ],
+
+    'Clothes': [
+        'cloth', 'clothes', 'clothing', 'shirt', 'pant', 'pants',
+        'trouser', 'saree', 'kurta', 'dress', 'fashion', 'garment',
+        'textile', 'tailor', 'stitching',
+    ],
+
+    'Shopping': [
+        'flipkart', 'flip kart', 'meesho', 'raz*meesho',
+        'myntra', 'nykaa', 'ajio', 'snapdeal', 'shopsy',
+        'raz*', 'instamart', 'hostinger',
+        # amazon@rapl is caught by note keywords (books/notebook/clothes)
+        # so amazon alone falls here as generic shopping
+        'amazon',
+    ],
+
+    'Home': [
+        'fan cov', 'fan',
+        'cutlery', 'soap', 'detergent', 'utensil', 'kitchen',
+        'vessel', 'broom', 'mop', 'bucket',
+        'household', 'furniture', 'mattress', 'pillow', 'bedsheet',
+        'curtain', 'mug', 'bottle',
+        'gas ', 'cylinder', 'lpg',
+        'electricity', 'water bill', 'wifi', 'broadband',
+        'post of',
+    ],
+
+    'Tools': [
+        'tool', 'tools', 'hardware',
+        'repair', 'repai', 'service center',
+        'mechanic', 'plumber', 'electrician', 'carpenter',
+        'bag repai', 'mobile repair', 'screen repair', 'spare',
+        'car to sc',
+    ],
+
+    'Garden': [
+        'garden', 'plant', 'nursery', 'seed', 'fertilizer', 'pot', 'soil',
+    ],
+
+    'Recharge': [
+        'recharge', 'gpayrecharge', 'gpay recharge',
+        'mobile', 'mobi', 'phon', 'phone',
+        'dth', 'airtel', 'jio', 'bsnl', 'vodafone',
+        'internet', 'postpaid', 'prepaid',
+        'lakshman.kamila', 'paytm.s19shw9',
+    ],
+
+    'Subscriptions': [
+        'netflix', 'amazon prime', 'hotstar', 'disney', 'spotify',
+        'youtube', 'playstore', 'play store', 'subscription',
+        'membership', 'manda', 'playstore@axisbank',
+    ],
+
+    'Gifts': [
+        'gift', 'donation', 'charity', 'temple', 'pooja', 'puja',
+    ],
+
+    'Wages': [
+        'wages', 'wage', 'salary', 'worker', 'maid', 'cook',
+        'driver', 'helper', 'staff',
+    ],
+
+    'Finance': [
+        'loan rep', 'loan', 'emi ', 'insurance', 'premium',
+        'mutual fund', 'sip', 'fixed deposit', 'nps', 'ppf',
+    ],
+
+    'Transfers': [
+        'neft', 'imps', 'ft imps', 'rtgs',
+        'nilima', 'biman', 'paytm-8746350',
+    ],
 }
 
 
 # ============================================================================
-# NEW FUNCTION: PARSE UPI TRANSACTION
+# FUZZY MATCHING SETUP
+# Build a flat keyword→category map for close-match lookups.
+# Only words 4+ characters are included to avoid false positives.
 # ============================================================================
-def parse_upi_transaction(particulars):
-    """
-    Extract meaningful information from UPI transaction strings.
-    
-    Args:
-        particulars (str): Raw UPI transaction description
-        
-    Returns:
-        dict: Parsed transaction info with keys:
-              - upi_id: The UPI handle (e.g., 'merchant@paytm')
-              - mcc: Merchant category code (e.g., '5411')
-              - transaction_id: UPI transaction reference
-              
-    Example:
-        Input: "UPIOUT/111422320001/paytmqr62k21i@ptys/UPI/7210"
-        Output: {
-            'upi_id': 'paytmqr62k21i@ptys',
-            'mcc': '7210',
-            'transaction_id': '111422320001'
-        }
-    
-    UPI Transaction Format (common patterns):
-        UPIOUT/<txn_id>/<upi_handle>/<text>/<mcc>
-        UPI-<name>-<upi_handle>-<bank_code>-<txn_id>-<description>
-    """
-    
-    result = {
-        'upi_id': None,
-        'mcc': None,
-        'transaction_id': None
-    }
-    
-    if not isinstance(particulars, str):
-        return result
-    
-    # Pattern 1: UPIOUT/txn_id/upi_handle/text/mcc
-    # Example: UPIOUT/111422320001/paytmqr62k21i@ptys/UPI/7210
-    upi_pattern1 = r'UPIOUT/(\d+)/([^/]+@[^/]+)/[^/]*/(\d{4})'
-    match1 = re.search(upi_pattern1, particulars)
-    if match1:
-        result['transaction_id'] = match1.group(1)
-        result['upi_id'] = match1.group(2)
-        result['mcc'] = match1.group(3)
-        return result
-    
-    # Pattern 2: UPI-NAME-upi_handle-bank-txn-description
-    # Example: UPI-JOHN DOE-john@paytm-SBIN000XXXX-123456-Payment
-    upi_pattern2 = r'UPI-[^-]+-([^-]+@[^-]+)-'
-    match2 = re.search(upi_pattern2, particulars)
-    if match2:
-        result['upi_id'] = match2.group(1)
-    
-    # Extract MCC if present anywhere (look for /XXXX pattern)
-    mcc_pattern = r'/(\d{4})(?:\s|$|/)'
-    mcc_match = re.search(mcc_pattern, particulars)
-    if mcc_match:
-        result['mcc'] = mcc_match.group(1)
-    
-    # Extract any @handle pattern
-    if not result['upi_id']:
-        handle_pattern = r'([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+)'
-        handle_match = re.search(handle_pattern, particulars)
-        if handle_match:
-            result['upi_id'] = handle_match.group(1)
-    
-    return result
+
+_FUZZY_KEYWORDS = []
+_FUZZY_KEYWORD_TO_CAT = {}
+
+for _cat, _words in CATEGORY_KEYWORDS.items():
+    for _w in _words:
+        if len(_w) >= 4 and '@' not in _w and '/' not in _w and '.' not in _w:
+            _FUZZY_KEYWORDS.append(_w)
+            _FUZZY_KEYWORD_TO_CAT[_w] = _cat
 
 
 # ============================================================================
-# ENHANCED FUNCTION: CATEGORIZE TRANSACTION
+# MERCHANT DETECTION
+# These UPI ID patterns belong to payment gateways, not individuals.
+# Personal UPIs (names / phone numbers) are everything else.
 # ============================================================================
-def categorize_transaction(particulars, tran_type):
-    """
-    Categorize a transaction based on its description (particulars).
-    
-    CATEGORIZATION PRIORITY (in order):
-        1. Special hardcoded cases (specific people/payees)
-        2. Merchant Category Code (MCC) - most reliable
-        3. UPI handle pattern matching
-        4. Keyword matching in description
-        5. Default to Uncategorized
-    
-    Args:
-        particulars (str): Transaction description from bank statement
-        tran_type (str): Transaction type (UPI, NEFT, ATM, etc.)
-    
-    Returns:
-        str: Category name (Food, Travel, Medical, etc.) or 'Uncategorized'
-    """
-    
-    # Handle missing/null values
-    if pd.isna(particulars):
-        return 'Uncategorized'
-    
-    # Convert to lowercase for case-insensitive matching
-    particulars_lower = str(particulars).lower()
-    
-    # ========================================================================
-    # PRIORITY 1: HARDCODED SPECIAL CASES
-    # ========================================================================
-    
-    # Special case: Rent payee (NILIMA SAHA)
-    if 'nilima saha' in particulars_lower:
-        return 'Rent'
-    
-    # Special case: Priyanka's UPI ID or name
-    if '20155456966' in particulars_lower or 'priyanka' in particulars_lower:
-        return 'Priyanka'
-    
-    # ========================================================================
-    # PRIORITY 2: PARSE UPI TRANSACTIONS AND USE MCC
-    # ========================================================================
-    
-    if 'upi' in particulars_lower:
-        upi_data = parse_upi_transaction(particulars)
-        
-        # Check if we have a valid MCC code
-        if upi_data['mcc'] and upi_data['mcc'] in MCC_CATEGORIES:
-            category = MCC_CATEGORIES[upi_data['mcc']]
-            # If MCC suggests a meaningful category (not just Miscellaneous), use it
-            if category != 'Miscellaneous':
-                return category
-            # If MCC says Miscellaneous, continue to other checks
-        
-        # Check UPI handle patterns
-        if upi_data['upi_id']:
-            upi_id_lower = upi_data['upi_id'].lower()
-            for handle, category in UPI_HANDLE_CATEGORIES.items():
-                if handle in upi_id_lower:
-                    # If handle gives us a meaningful category, use it
-                    if category != 'Miscellaneous':
-                        return category
-    
-    # ========================================================================
-    # PRIORITY 3: KEYWORD MATCHING (LEGACY)
-    # ========================================================================
-    
-    for category, keywords in CATEGORY_KEYWORDS.items():
-        for keyword in keywords:
-            if keyword.lower() in particulars_lower:
-                return category
-    
-    # ========================================================================
-    # PRIORITY 4: DEFAULT PATTERNS
-    # ========================================================================
-    
-    # UPI /0000 transactions are typically person-to-person (P2P)
-    if '/0000' in particulars_lower and 'upi' in particulars_lower:
-        return 'Miscellaneous'
-    
-    # BharatPe without other indicators = Miscellaneous
-    if 'bharatpe' in particulars_lower:
-        return 'Miscellaneous'
-    
-    # ========================================================================
-    # PRIORITY 5: UNCATEGORIZED
-    # ========================================================================
-    
-    return 'Uncategorized'
+
+_MERCHANT_PATTERNS = [
+    'paytmqr', 'paytm.', 'bharatpe.', 'gpay-', 'gpayrecharge',
+    'amazon', 'flipkart', 'razorpay', 'rzp@', 'postbank',
+    'ppqr', 'ptybl', 'ptyes', 'iservuqrs', 'okbizax',
+    'okpayaxis', 'naviaxis', 'rldijp', 'hostinger',
+    'yssofindia', 'getepay', 'cmcltd', 'bpunity',
+]
+
+# Notes that carry no useful information
+_USELESS_NOTES = {
+    'upi', '0000', 'up', 'f', 't', 'mi', 'sw', 'cu', '',
+    'sent', 'pay', 'na', 'n/a',
+}
 
 
 # ============================================================================
-# FUNCTION: CLEAN NUMERIC VALUE
+# HELPER FUNCTIONS
 # ============================================================================
+
 def clean_numeric_value(value):
-    """
-    Convert string values with commas to float numbers.
-    
-    Args:
-        value: String or number from Excel (e.g., "1,234.56" or 1234.56)
-    
-    Returns:
-        float: Cleaned numeric value, or 0.0 if invalid
-    
-    Example:
-        "1,234.56" → 1234.56
-        "500" → 500.0
-        NaN → 0.0
-    """
-    
-    if isinstance(value, (int, float)):
-        return float(value) if not pd.isna(value) else 0.0
-    
-    if isinstance(value, str):
-        try:
-            cleaned = value.replace(',', '')
-            return float(cleaned)
-        except (ValueError, AttributeError):
-            return 0.0
-    
-    return 0.0
+    """Convert a bank amount string like '1,234.56' to float. Returns 0.0 for blanks."""
+    if value is None:
+        return 0.0
+    s = str(value).strip()
+    if s in ['', 'nan', 'NaN', '-']:
+        return 0.0
+    try:
+        return float(s.replace(',', ''))
+    except ValueError:
+        return 0.0
 
 
-# ============================================================================
-# FUNCTION: CLEAN DATE VALUE
-# ============================================================================
-def clean_date(date_value):
+def clean_date(value):
+    """Parse a date value into a pandas Timestamp. Returns NaT if unparseable."""
+    import pandas as pd
+    try:
+        return pd.to_datetime(str(value), dayfirst=True)
+    except Exception:
+        return pd.NaT
+
+
+def _extract_mcc(text):
+    """Extract the 4-digit MCC code from the end of a UPI string."""
+    match = re.search(r'/(\d{4})$', text.strip())
+    return match.group(1) if match else None
+
+
+def _get_upi_parts(text):
     """
-    Convert various date formats to standardized datetime.
-    
-    Args:
-        date_value: Date from Excel (can be string "01/01/2026" or datetime)
-    
-    Returns:
-        datetime: Standardized date object
-    
-    Handles:
-        - String dates like "01/01/2026"
-        - Already datetime objects
-        - Invalid dates (returns None)
+    Split a UPI string into (upi_id, note).
+    UPI format: UPIOUT/txnid/upi_id@bank/note/MCC
     """
-    
-    if pd.isna(date_value):
+    parts = text.split('/')
+    upi_id = parts[2].strip() if len(parts) > 2 else ''
+    note   = parts[3].strip().lower() if len(parts) > 3 else ''
+    return upi_id, note
+
+
+def _is_merchant_upi(upi_id):
+    """Return True if this UPI ID belongs to a payment gateway or merchant."""
+    uid = upi_id.lower()
+    return any(m in uid for m in _MERCHANT_PATTERNS)
+
+
+def _fuzzy_match_note(note):
+    """
+    Return category if note is close enough to a known keyword.
+    Uses 78% similarity threshold — catches spelling mistakes like
+    'poants'→'pants', 'icecre'→'icecream', 'groce'→'grocery'.
+    Returns None if no confident match.
+    """
+    if not note or len(note) < 3:
         return None
-    
-    if isinstance(date_value, datetime):
-        return date_value
-    
-    if isinstance(date_value, str):
-        try:
-            return pd.to_datetime(date_value, format='%d/%m/%Y')
-        except:
-            try:
-                return pd.to_datetime(date_value)
-            except:
-                return None
-    
+    matches = get_close_matches(note, _FUZZY_KEYWORDS, n=1, cutoff=0.78)
+    if matches:
+        return _FUZZY_KEYWORD_TO_CAT[matches[0]]
     return None
 
 
 # ============================================================================
-# NEW FUNCTION: GENERATE CATEGORIZATION REPORT
+# MAIN CATEGORIZER
 # ============================================================================
-def generate_categorization_report(df):
-    """
-    Generate a detailed report showing categorization effectiveness.
-    
-    Shows:
-        - How many transactions per category
-        - Percentage of Uncategorized vs Categorized
-        - Sample uncategorized transactions for review
-    
-    Args:
-        df (DataFrame): Categorized expense dataframe
-    """
-    
-    print("\n" + "=" * 60)
-    print("📊 CATEGORIZATION EFFECTIVENESS REPORT")
-    print("=" * 60)
-    
-    total_transactions = len(df)
-    category_counts = df['Category'].value_counts()
-    
-    print(f"\n📈 Total Transactions: {total_transactions}")
-    print(f"\n🏷️  Breakdown by Category:")
-    print("-" * 60)
-    
-    for category in sorted(category_counts.index):
-        count = category_counts[category]
-        percentage = (count / total_transactions) * 100
-        print(f"   {category:20s}: {count:4d} transactions ({percentage:5.1f}%)")
-    
-    # Calculate success metrics
-    uncategorized_count = category_counts.get('Uncategorized', 0)
-    misc_count = category_counts.get('Miscellaneous', 0)
-    problem_count = uncategorized_count + misc_count
-    problem_percentage = (problem_count / total_transactions) * 100
-    success_percentage = 100 - problem_percentage
-    
-    print("\n" + "-" * 60)
-    print(f"✅ Successfully Categorized: {total_transactions - problem_count} ({success_percentage:.1f}%)")
-    print(f"❓ Needs Review: {problem_count} ({problem_percentage:.1f}%)")
-    
-    # Show sample of uncategorized for user review
-    if uncategorized_count > 0:
-        print(f"\n🔍 Sample Uncategorized Transactions (showing up to 10):")
-        print("-" * 60)
-        uncategorized = df[df['Category'] == 'Uncategorized'].head(10)
-        for idx, row in uncategorized.iterrows():
-            print(f"   {row['Particulars'][:70]}")
-        
-        if uncategorized_count > 10:
-            print(f"   ... and {uncategorized_count - 10} more")
 
+def categorize_transaction(particulars, tran_type='Unknown', amount=0):
+    """
+    Determine the spending category for a single bank transaction.
 
-# ============================================================================
-# MAIN FUNCTION: PROCESS EXPENSE FILE
-# ============================================================================
-def process_expense_file(input_file_path, output_file_path):
-    """
-    Main function to process bank statement and create categorized expense file.
-    
+    Priority order:
+    1. Bank charges (by text pattern)
+    2. ATM withdrawals → amount-based cash category
+    3. UPI note — exact keyword match (most reliable human signal)
+    4. UPI note — fuzzy match (catches spelling mistakes)
+    5. MCC code lookup (merchant category from bank)
+    6. Full Particulars text keyword scan
+    7. Personal UPI + amount < ₹100 + useless note → Food
+    8. Transfer-type transactions → Transfers
+    9. Fallback → Miscellaneous
+
     Args:
-        input_file_path (str): Path to input Excel file (bank statement)
-        output_file_path (str): Path where output Excel file will be saved
-    
-    Process:
-        1. Read bank statement (skip header rows)
-        2. Filter only withdrawal transactions
-        3. Categorize each transaction (using improved algorithm)
-        4. Create summary by category
-        5. Generate effectiveness report
-        6. Save to Excel with exact format required
+        particulars: Transaction description from the bank statement
+        tran_type:   Transaction type e.g. 'UPI', 'ATM', 'NEFT', 'TFR'
+        amount:      Transaction amount (float) — used for ATM and food rules
+
+    Returns:
+        str: Category name
     """
-    
-    print(f"📂 Reading input file: {input_file_path}")
-    
-    # ========================================================================
-    # STEP 1: READ INPUT FILE
-    # ========================================================================
-    
-    try:
-        df = pd.read_excel(input_file_path, header=10)
-        print(f"✓ File loaded successfully: {len(df)} rows found")
-    except Exception as e:
-        print(f"❌ Error reading file: {e}")
-        return
-    
-    # ========================================================================
-    # STEP 2: CLEAN AND FILTER DATA
-    # ========================================================================
-    
-    df = df[df['Sl. No.'].notna()]
-    df = df[df['Sl. No.'].apply(lambda x: str(x).isdigit())]
-    
-    print(f"✓ After cleaning: {len(df)} transaction rows")
-    
-    df['Withdrawal_Clean'] = df['Withdrawal'].apply(clean_numeric_value)
-    df['Deposit_Clean'] = df['Deposit'].apply(clean_numeric_value)
-    df['Value Date_Clean'] = df['Value Date'].apply(clean_date)
-    
-    # ========================================================================
-    # STEP 3: FILTER ONLY WITHDRAWALS (EXPENSES)
-    # ========================================================================
-    
-    expense_df = df[df['Withdrawal_Clean'] > 0].copy()
-    print(f"✓ Found {len(expense_df)} expense transactions (withdrawals)")
-    
-    # ========================================================================
-    # STEP 4: CATEGORIZE EACH TRANSACTION (IMPROVED ALGORITHM)
-    # ========================================================================
-    
-    print("🏷️  Categorizing transactions with improved algorithm...")
-    expense_df['Category'] = expense_df.apply(
-        lambda row: categorize_transaction(row['Particulars'], row['Tran Type']),
-        axis=1
+    if not particulars or str(particulars).strip() == '':
+        return 'Miscellaneous'
+
+    text  = str(particulars).lower().strip()
+    tran  = str(tran_type).lower().strip()
+    amt   = float(amount) if amount else 0.0
+
+    # ── 1. Bank charges ───────────────────────────────────────────────────────
+    if 'chrg/' in text or 'mob alert' in text:
+        return 'Bank Charges'
+
+    # ── 2. ATM withdrawals — amount tells us what the cash was for ────────────
+    if tran == 'atm' or text.startswith('to atm/'):
+        if amt >= 2000:
+            return 'Family Cash'
+        return 'Cash Withdrawal'
+
+    # ── 3 & 4. Extract UPI note and try keyword + fuzzy matching ─────────────
+    upi_id, note = _get_upi_parts(text)
+
+    if note and note not in _USELESS_NOTES:
+        # Exact keyword match on note first
+        for category, keywords in CATEGORY_KEYWORDS.items():
+            for keyword in keywords:
+                if keyword in note:
+                    return category
+        # Fuzzy match — catches spelling mistakes
+        fuzzy = _fuzzy_match_note(note)
+        if fuzzy:
+            return fuzzy
+
+    # ── 5. MCC code lookup ────────────────────────────────────────────────────
+    mcc = _extract_mcc(text)
+    if mcc and mcc in MCC_CATEGORY_MAP and MCC_CATEGORY_MAP[mcc] is not None:
+        # Only trust MCC when note was useless or absent
+        # (note already ran above and didn't match — MCC is our next best signal)
+        mcc_cat = MCC_CATEGORY_MAP[mcc]
+        if mcc != '0000':
+            return mcc_cat
+
+    # ── 6. Full text keyword scan (UPI IDs, merchant names) ──────────────────
+    is_transfer_type = (
+        tran in ['neft', 'imps', 'rtgs'] or
+        'ft imps' in text or
+        text.startswith('nft/')
     )
-    
-    # ========================================================================
-    # STEP 4.5: GENERATE EFFECTIVENESS REPORT
-    # ========================================================================
-    
-    generate_categorization_report(expense_df)
-    
-    # ========================================================================
-    # STEP 5: PREPARE OUTPUT DATAFRAME
-    # ========================================================================
-    
-    output_df = pd.DataFrame({
-        'Value Date': expense_df['Value Date_Clean'],
-        'Particulars': expense_df['Particulars'],
-        'Tran Type': expense_df['Tran Type'],
-        'Category': expense_df['Category'],
-        'Withdrawals': expense_df['Withdrawal_Clean']
-    })
-    
-    # ========================================================================
-    # STEP 6: CREATE CATEGORY SUMMARY
-    # ========================================================================
-    
-    category_totals = expense_df.groupby('Category')['Withdrawal_Clean'].sum()
-    grand_total = expense_df['Withdrawal_Clean'].sum()
-    
-    summary_rows = []
-    
-    summary_rows.append({
-        'Value Date': 'Total',
-        'Particulars': None,
-        'Tran Type': None,
-        'Category': None,
-        'Withdrawals': grand_total
-    })
-    
-    summary_rows.append({
-        'Value Date': None,
-        'Particulars': None,
-        'Tran Type': None,
-        'Category': None,
-        'Withdrawals': None
-    })
-    summary_rows.append({
-        'Value Date': None,
-        'Particulars': None,
-        'Tran Type': None,
-        'Category': None,
-        'Withdrawals': None
-    })
-    
-    for category in sorted(category_totals.index):
-        summary_rows.append({
-            'Value Date': None,
-            'Particulars': None,
-            'Tran Type': None,
-            'Category': category,
-            'Withdrawals': category_totals[category]
-        })
-    
-    summary_rows.append({
-        'Value Date': None,
-        'Particulars': None,
-        'Tran Type': None,
-        'Category': None,
-        'Withdrawals': grand_total
-    })
-    
-    summary_df = pd.DataFrame(summary_rows)
-    final_output = pd.concat([output_df, summary_df], ignore_index=True)
-    
-    # ========================================================================
-    # STEP 7: SAVE TO EXCEL
-    # ========================================================================
-    
-    print(f"\n💾 Saving output to: {output_file_path}")
-    
-    try:
-        final_output.to_excel(output_file_path, index=False, engine='openpyxl')
-        print(f"✅ SUCCESS! File saved successfully.")
-        print(f"\n📈 Summary:")
-        print(f"   Total Transactions: {len(expense_df)}")
-        print(f"   Total Amount: ₹{grand_total:,.2f}")
-        print(f"   Output file: {output_file_path}")
-        
-    except Exception as e:
-        print(f"❌ Error saving file: {e}")
 
+    for category, keywords in CATEGORY_KEYWORDS.items():
+        for keyword in keywords:
+            if keyword in text:
+                return category
 
-# ============================================================================
-# MAIN EXECUTION
-# ============================================================================
-if __name__ == "__main__":
-    """
-    Main execution block - runs when script is executed directly.
-    
-    To use this script:
-        1. Update the INPUT_FILE path to your bank statement location
-        2. Update the OUTPUT_FILE path to where you want the result
-        3. Run: python expense_categorizer_v2.py
-    """
-    
-    INPUT_FILE = "bank_transaction_2025.xlsx"
-    OUTPUT_FILE = "Categorized_Expenses_2025_v2.xlsx"
-    
-    print("=" * 60)
-    print("💰 EXPENSE CATEGORIZER - STAGE 1 (ITERATION 3)")
-    print("=" * 60)
-    print()
-    
-    process_expense_file(INPUT_FILE, OUTPUT_FILE)
-    
-    print()
-    print("=" * 60)
-    print("✨ Processing Complete!")
-    print("=" * 60)
+    # ── 7. Personal UPI + tiny amount + no useful note → Food ────────────────
+    # Rule: when you send ₹15–₹99 to a person with no note,
+    # it is almost always a small food purchase (street vendor, etc.)
+    if not _is_merchant_upi(upi_id) and note in _USELESS_NOTES and amt < 100:
+        return 'Food'
+
+    # ── 8. Transfer-type with no keyword match ────────────────────────────────
+    if is_transfer_type:
+        return 'Transfers'
+
+    return 'Miscellaneous'
