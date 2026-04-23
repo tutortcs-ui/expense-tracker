@@ -46,20 +46,16 @@ DATA_DIR = Path("data/processed_statements")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 CATEGORY_COLORS = {
-    'Food': '#4CAF50',
-    'Travel': '#2196F3',
-    'Medical': '#F44336',
-    'Books': '#9C27B0',
-    'Tools': '#FF9800',
-    'Garden': '#8BC34A',
-    'Rent': '#795548',
-    'Clothes': '#E91E63',
-    'Priyanka': '#00BCD4',
-    'Miscellaneous': '#9E9E9E',
-    'Uncategorized': '#607D8B',
-    'Recharge': '#FF5722',
-    'Subscriptions': '#3F51B5',
-    'Transfers': '#795548',
+    'Rent':                    '#795548',
+    'Family':                  '#00BCD4',
+    'Food':                    '#4CAF50',
+    'Travel':                  '#2196F3',
+    'Medical':                 '#F44336',
+    'Subscriptions & Devices': '#3F51B5',
+    'Books':                   '#9C27B0',
+    'Garden':                  '#8BC34A',
+    'Gifts':                   '#E91E63',
+    'Miscellaneous':           '#9E9E9E',
 }
 
 
@@ -198,7 +194,7 @@ def load_and_process_statement(uploaded_file):
             return None
 
         expense_df['Category'] = expense_df.apply(
-            lambda row: categorize_transaction(row['Particulars'], row['Tran Type']),
+            lambda row: categorize_transaction(row['Particulars'], row['Tran Type'], row['Withdrawals']),
             axis=1
         )
 
