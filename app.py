@@ -1,14 +1,23 @@
 """
 EXPENSE TRACKER - STAGE 3: GOOGLE LOGIN + PERSONAL LEARNING
 =============================================================
-What's new in this version:
-- Google OAuth login button
-- After login: loads YOUR personal category rules from Google Drive
-- Your rules are applied BEFORE default rules (so your preferences always win)
-- When you fix a category, the app learns and saves back to Drive automatically
-- Guest mode still works — just no saving between sessions
 
-Run locally: streamlit run app.py
+What's new in this version (everything from Stage 2 is preserved):
+- Google OAuth login button (top right)
+- After login: loads YOUR personal category rules from Google Drive
+- Your rules apply BEFORE default rules — your preferences always win
+- When you fix a category, the app learns the rule and saves to Drive
+- Guest mode still works — upload and analyze without logging in
+
+Original features kept:
+- Smart bank statement parser (works across all Indian banks)
+- Dashboard with pie + bar charts, monthly averages
+- Monthly Analysis tab (when multi_month.py is present)
+- All Transactions tab with filters and search
+- Fix Categories tab
+- Excel + PDF download
+
+Run: streamlit run app.py
 """
 
 import streamlit as st
@@ -20,7 +29,6 @@ import os
 import json
 from pathlib import Path
 from io import BytesIO
-import base64
 import requests
 
 # Google OAuth libraries
@@ -29,51 +37,55 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
-# Import our Stage 1 categorization logic
+# Import Stage 1 categorization logic
 from expense_categorizer import (
     categorize_transaction,
-    clean_numeric_value,
-    clean_date,
     CATEGORY_KEYWORDS
 )
+
+# Import multi-month analysis module (optional — tab disappears if file missing)
+try:
+    from multi_month import render_monthly_analysis_tab
+    MULTI_MONTH_AVAILABLE = True
+except ImportError:
+    MULTI_MONTH_AVAILABLE = False
+
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-# These come from Streamlit secrets (never hardcode these)
+# Google OAuth credentials — stored in Streamlit secrets, never in code
 GOOGLE_CLIENT_ID     = st.secrets.get("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = st.secrets.get("GOOGLE_CLIENT_SECRET", "")
 REDIRECT_URI         = st.secrets.get("REDIRECT_URI", "")
 
-# The folder name we create in your Google Drive
+# Google Drive folder and rules file names
 DRIVE_FOLDER_NAME = "expense-tracker"
+RULES_FILENAME    = "my_rules.json"
 
-# The filename where your personal rules are stored
-RULES_FILENAME = "my_rules.json"
-
-# Google API scopes — what we're allowed to access
+# Google API scopes — only access files created by this app
 SCOPES = [
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
-    "https://www.googleapis.com/auth/drive.file",  # Only files created by this app
+    "https://www.googleapis.com/auth/drive.file",
 ]
 
-# Category colors for charts
+# Category colors — kept exactly from original
 CATEGORY_COLORS = {
-    'Food': '#4CAF50',
-    'Travel': '#2196F3',
-    'Medical': '#F44336',
-    'Books': '#9C27B0',
-    'Tools': '#FF9800',
-    'Garden': '#8BC34A',
-    'Rent': '#795548',
-    'Clothes': '#E91E63',
-    'Priyanka': '#00BCD4',
-    'Miscellaneous': '#9E9E9E',
-    'Uncategorized': '#607D8B'
+    'Rent':                    '#795548',
+    'Family':                  '#00BCD4',
+    'Food':                    '#4CAF50',
+    'Travel':                  '#2196F3',
+    'Medical':                 '#F44336',
+    'Subscriptions & Devices': '#3F51B5',
+    'Books':                   '#9C27B0',
+    'Garden':                  '#8BC34A',
+    'Gifts':                   '#E91E63',
+    'Miscellaneous':           '#9E9E9E',
 }
+
 
 # ============================================================================
 # GOOGLE OAUTH FUNCTIONS
@@ -81,9 +93,8 @@ CATEGORY_COLORS = {
 
 def get_google_auth_url():
     """
-    Generate the Google login URL.
-    When user clicks this, Google asks them to sign in and grant permission.
-    Returns the URL to redirect the user to.
+    Build the Google login URL.
+    When the user clicks it, Google asks them to sign in and grant permission.
     """
     flow = Flow.from_client_config(
         {
@@ -109,9 +120,8 @@ def get_google_auth_url():
 
 def exchange_code_for_credentials(code):
     """
-    After Google redirects back with a 'code', exchange it for real credentials.
-    This gives us a token we can use to access Drive.
-    Returns a Credentials object or None if it fails.
+    After Google redirects back with a ?code= parameter, exchange it for
+    real credentials we can use to access Drive.
     """
     try:
         flow = Flow.from_client_config(
@@ -136,10 +146,7 @@ def exchange_code_for_credentials(code):
 
 
 def get_user_info(credentials):
-    """
-    After login, fetch the user's name and email from Google.
-    Returns a dict with 'name' and 'email'.
-    """
+    """Fetch the logged-in user's name and email from Google."""
     try:
         resp = requests.get(
             "https://www.googleapis.com/oauth2/v2/userinfo",
@@ -151,19 +158,19 @@ def get_user_info(credentials):
 
 
 def credentials_to_dict(credentials):
-    """Convert credentials object to a plain dict so we can store in session state."""
+    """Convert credentials object to plain dict for storage in session state."""
     return {
-        "token": credentials.token,
+        "token":         credentials.token,
         "refresh_token": credentials.refresh_token,
-        "token_uri": credentials.token_uri,
-        "client_id": credentials.client_id,
+        "token_uri":     credentials.token_uri,
+        "client_id":     credentials.client_id,
         "client_secret": credentials.client_secret,
-        "scopes": credentials.scopes,
+        "scopes":        credentials.scopes,
     }
 
 
 def dict_to_credentials(creds_dict):
-    """Rebuild credentials object from the dict stored in session state."""
+    """Rebuild credentials object from dict stored in session state."""
     return Credentials(
         token=creds_dict["token"],
         refresh_token=creds_dict.get("refresh_token"),
@@ -179,29 +186,22 @@ def dict_to_credentials(creds_dict):
 # ============================================================================
 
 def get_drive_service(credentials):
-    """
-    Create a Google Drive service object using the user's credentials.
-    This is what we use to read/write files on their Drive.
-    """
+    """Create a Google Drive API service using the user's credentials."""
     return build("drive", "v3", credentials=credentials)
 
 
 def get_or_create_folder(service):
     """
-    Find our 'expense-tracker' folder in Drive, or create it if it doesn't exist.
-    Returns the folder ID.
+    Find our 'expense-tracker' folder in the user's Drive.
+    Creates it if it doesn't exist. Returns the folder ID.
     """
-    # Search for existing folder
     results = service.files().list(
         q=f"name='{DRIVE_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false",
         fields="files(id, name)"
     ).execute()
-
     files = results.get("files", [])
     if files:
-        return files[0]["id"]  # Folder already exists
-
-    # Create the folder
+        return files[0]["id"]
     folder_metadata = {
         "name": DRIVE_FOLDER_NAME,
         "mimeType": "application/vnd.google-apps.folder"
@@ -218,18 +218,13 @@ def load_rules_from_drive(service):
     """
     try:
         folder_id = get_or_create_folder(service)
-
-        # Look for the rules file in our folder
         results = service.files().list(
             q=f"name='{RULES_FILENAME}' and '{folder_id}' in parents and trashed=false",
             fields="files(id, name)"
         ).execute()
-
         files = results.get("files", [])
         if not files:
-            return {}  # No rules yet — fresh start
-
-        # Download and parse the rules file
+            return {}
         file_id = files[0]["id"]
         request = service.files().get_media(fileId=file_id)
         buffer = BytesIO()
@@ -237,11 +232,8 @@ def load_rules_from_drive(service):
         done = False
         while not done:
             _, done = downloader.next_chunk()
-
         buffer.seek(0)
-        rules = json.loads(buffer.read().decode("utf-8"))
-        return rules
-
+        return json.loads(buffer.read().decode("utf-8"))
     except Exception as e:
         st.warning(f"Could not load your rules from Drive: {str(e)}")
         return {}
@@ -251,40 +243,21 @@ def save_rules_to_drive(service, rules):
     """
     Save the user's updated personal rules back to their Google Drive.
     Overwrites the existing file if it exists.
-    Rules format: {"SWIGGY": "Food", "UBER": "Travel", ...}
     """
     try:
         folder_id = get_or_create_folder(service)
-
-        # Convert rules dict to JSON bytes
         rules_json = json.dumps(rules, indent=2).encode("utf-8")
         media = MediaIoBaseUpload(BytesIO(rules_json), mimetype="application/json")
-
-        # Check if file already exists
         results = service.files().list(
             q=f"name='{RULES_FILENAME}' and '{folder_id}' in parents and trashed=false",
             fields="files(id)"
         ).execute()
-
         files = results.get("files", [])
         if files:
-            # Update existing file
-            service.files().update(
-                fileId=files[0]["id"],
-                media_body=media
-            ).execute()
+            service.files().update(fileId=files[0]["id"], media_body=media).execute()
         else:
-            # Create new file
-            file_metadata = {
-                "name": RULES_FILENAME,
-                "parents": [folder_id]
-            }
-            service.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields="id"
-            ).execute()
-
+            file_metadata = {"name": RULES_FILENAME, "parents": [folder_id]}
+            service.files().create(body=file_metadata, media_body=media, fields="id").execute()
         return True
     except Exception as e:
         st.error(f"Could not save rules to Drive: {str(e)}")
@@ -299,226 +272,289 @@ def apply_personal_rules(particulars, personal_rules):
     """
     Check if any keyword from the user's personal rules matches this transaction.
     Personal rules always win over default rules.
-    Returns the category string if a match is found, or None if no match.
+    Returns the category string if matched, or None if no match.
     """
     particulars_upper = str(particulars).upper()
     for keyword, category in personal_rules.items():
         if keyword.upper() in particulars_upper:
             return category
-    return None  # No personal rule matched
+    return None
 
 
 def learn_from_correction(particulars, new_category, personal_rules):
     """
     When the user fixes a category, extract a keyword from the transaction
-    description and save it as a new personal rule.
+    description and add it as a new personal rule.
     This is how the app learns — each correction teaches it one new rule.
-    Returns the updated rules dict.
     """
-    # Extract the most useful keyword from the particulars
-    # Strategy: take the first meaningful word (skip common banking words)
     skip_words = {
         'UPI', 'NEFT', 'IMPS', 'RTGS', 'ACH', 'TO', 'FROM', 'BY',
         'DR', 'CR', 'VPA', 'REF', 'NO', 'TXN', 'TRANSFER', 'PAYMENT',
         'THE', 'AND', 'FOR', 'INR', 'A/C', 'AC'
     }
-
     words = str(particulars).upper().split()
-    keyword = None
     for word in words:
-        # Clean the word — remove special characters
         clean_word = ''.join(c for c in word if c.isalnum())
         if clean_word and clean_word not in skip_words and len(clean_word) > 2:
-            keyword = clean_word
+            personal_rules[clean_word] = new_category
             break
-
-    if keyword:
-        personal_rules[keyword] = new_category
-
     return personal_rules
 
 
-def categorize_with_personal_rules(particulars, tran_type, personal_rules):
+def categorize_with_personal_rules(particulars, tran_type, amount, personal_rules):
     """
-    Categorize a transaction using personal rules first, then default rules.
-    Personal rules always take priority — this is what makes it personalized.
+    Categorize using personal rules first, then default rules.
+    Personal rules always take priority.
     """
-    # First: check user's personal rules
-    personal_category = apply_personal_rules(particulars, personal_rules)
-    if personal_category:
-        return personal_category
-
-    # Second: fall back to default rules from expense_categorizer.py
-    return categorize_transaction(particulars, tran_type)
+    personal_cat = apply_personal_rules(particulars, personal_rules)
+    if personal_cat:
+        return personal_cat
+    return categorize_transaction(particulars, tran_type, amount)
 
 
 # ============================================================================
-# FILE PROCESSING
+# FILE PARSER — kept exactly from original, personal_rules added
 # ============================================================================
 
-def load_and_process_statement(uploaded_file, personal_rules):
+def load_and_process_statement(uploaded_file, personal_rules=None):
     """
-    Load bank statement Excel file and categorize transactions.
-    Uses personal rules first, then default rules.
-    Returns a processed DataFrame with categories applied.
+    Load bank statement from any Indian bank and extract only the 5 columns we need.
+
+    Strategy: Scan every row until we find one that looks like a header (contains
+    keywords like 'date', 'particulars', 'withdrawal'). Then extract ONLY those
+    columns — blank columns, bank info rows, junk rows are all discarded.
+
+    Works across SBI, HDFC, Axis, Federal Bank, and most Indian bank formats.
+    Personal rules are applied before default categorization if provided.
     """
+    if personal_rules is None:
+        personal_rules = {}
+
     try:
-        try:
-            df = pd.read_excel(uploaded_file, header=10)
-        except:
-            df = pd.read_excel(uploaded_file, header=0)
+        # Step 1: Read raw file with NO assumptions about structure
+        file_name = uploaded_file.name.lower()
+        if file_name.endswith('.xls'):
+            raw = pd.read_excel(uploaded_file, header=None, engine='xlrd')
+        else:
+            raw = pd.read_excel(uploaded_file, header=None, engine='openpyxl')
 
-        # Find required columns by common names across Indian banks
-        date_col = particulars_col = withdrawal_col = deposit_col = tran_type_col = None
+        # Step 2: Keyword map — order matters, more specific phrases first
+        COLUMN_KEYWORDS = {
+            'date':        ['value date', 'transaction date', 'txn date', 'tran date', 'date'],
+            'particulars': ['particulars', 'description', 'narration', 'details', 'transaction details'],
+            'tran_type':   ['tran type', 'transaction type', 'mode'],
+            'withdrawals': ['withdrawal', 'withdrawals', 'debit', 'paid', 'dr'],
+            'deposits':    ['deposit', 'deposits', 'credit', 'received', 'cr'],
+        }
 
-        for col in df.columns:
-            col_lower = str(col).lower()
-            if any(x in col_lower for x in ['date', 'value date', 'transaction date']):
-                date_col = date_col or col
-            if any(x in col_lower for x in ['particulars', 'description', 'narration', 'details']):
-                particulars_col = particulars_col or col
-            if any(x in col_lower for x in ['withdrawal', 'debit', 'paid', 'dr']):
-                withdrawal_col = withdrawal_col or col
-            if any(x in col_lower for x in ['deposit', 'credit', 'received', 'cr']):
-                deposit_col = deposit_col or col
-            if any(x in col_lower for x in ['type', 'tran type', 'transaction type', 'mode']):
-                tran_type_col = tran_type_col or col
+        # Step 3: Scan rows to find the header row automatically
+        header_row_index = None
+        for i, row in raw.iterrows():
+            row_values = [str(v).lower().strip() for v in row.values]
+            matches = sum(
+                1 for keywords in COLUMN_KEYWORDS.values()
+                if any(kw in row_values for kw in keywords)
+            )
+            if matches >= 3:
+                header_row_index = i
+                break
 
-        if not all([date_col, particulars_col, withdrawal_col]):
-            st.error(f"Could not find required columns. Your file has: {', '.join(df.columns.tolist())}")
+        if header_row_index is None:
+            st.error(f"""
+            ❌ Could not find the header row in your file.
+
+            **Scanned:** {raw.shape[0]} rows × {raw.shape[1]} columns
+
+            **What we look for:** A row containing words like 'Date', 'Particulars',
+            'Withdrawal', 'Deposit', 'Narration', or 'Description'.
+
+            **First 5 rows of your file (for debugging):**
+            {raw.head(5).to_string()}
+            """)
             return None
 
-        df = df.dropna(subset=[date_col, particulars_col], how='all')
-        df = df[df[date_col].notna()]
-        df['Withdrawal_Clean'] = df[withdrawal_col].apply(clean_numeric_value)
-        df['Deposit_Clean']    = df[deposit_col].apply(clean_numeric_value) if deposit_col else 0
-        df['Value Date_Clean'] = df[date_col].apply(clean_date)
+        # Step 4: Map each field to its exact column index
+        header_values = [str(v).lower().strip() for v in raw.iloc[header_row_index].values]
+        col_map = {}
+        for field, keywords in COLUMN_KEYWORDS.items():
+            for kw in keywords:
+                if kw in header_values:
+                    col_map[field] = header_values.index(kw)
+                    break
 
-        expense_df = df[df['Withdrawal_Clean'] > 0].copy()
+        if 'date' not in col_map or 'particulars' not in col_map:
+            st.error(f"""
+            ❌ Found header row at row {header_row_index}, but could not locate
+            Date or Particulars columns.
+
+            **Columns found in that row:**
+            {', '.join(str(v) for v in raw.iloc[header_row_index].values if str(v) != 'nan')}
+            """)
+            return None
+
+        if 'withdrawals' not in col_map:
+            st.error(f"""
+            ❌ Could not find a Withdrawal/Debit column in your file.
+
+            **Columns found:** {', '.join(str(v) for v in raw.iloc[header_row_index].values if str(v) != 'nan')}
+
+            **Expected one of:** Withdrawal, Withdrawals, Debit, Paid, Dr
+            """)
+            return None
+
+        # Step 5: Extract only data rows (skip header row and any footer rows)
+        data = raw.iloc[header_row_index + 1:].copy()
+        data = data[data.iloc[:, col_map['date']].notna()]
+        data = data[data.iloc[:, col_map['particulars']].notna()]
+
+        if len(data) == 0:
+            st.warning("⚠️ No transaction rows found after the header row.")
+            return None
+
+        # Step 6: Clean amounts and dates
+        def clean_amount(val):
+            """Convert bank amount string like '1,999.00' to float 1999.0"""
+            if pd.isna(val) or str(val).strip() in ['', 'nan']:
+                return 0.0
+            try:
+                return float(str(val).replace(',', '').strip())
+            except:
+                return 0.0
+
+        def clean_date_val(val):
+            """Parse date strings and datetime objects into proper date objects"""
+            try:
+                return pd.to_datetime(val, dayfirst=True)
+            except:
+                return pd.NaT
+
+        # Step 7: Build the clean 5-column DataFrame
+        clean_data = pd.DataFrame({
+            'Date': [clean_date_val(v) for v in data.iloc[:, col_map['date']]],
+            'Particulars': [str(v) for v in data.iloc[:, col_map['particulars']]],
+            'Tran Type': (
+                [str(v) for v in data.iloc[:, col_map['tran_type']]]
+                if 'tran_type' in col_map else ['N/A'] * len(data)
+            ),
+            'Withdrawals': [clean_amount(v) for v in data.iloc[:, col_map['withdrawals']]],
+            'Deposits': (
+                [clean_amount(v) for v in data.iloc[:, col_map['deposits']]]
+                if 'deposits' in col_map else [0.0] * len(data)
+            ),
+        })
+
+        # Step 8: Keep only expense rows, then categorize
+        # Uses personal rules first, then default rules
+        expense_df = clean_data[clean_data['Withdrawals'] > 0].copy()
+
         if len(expense_df) == 0:
-            st.warning("No expense transactions found in this file.")
+            st.warning("⚠️ No withdrawal transactions found in this file.")
             return None
 
-        # Categorize using personal rules + default rules
         expense_df['Category'] = expense_df.apply(
             lambda row: categorize_with_personal_rules(
-                row[particulars_col],
-                row[tran_type_col] if tran_type_col else 'Unknown',
+                row['Particulars'],
+                row['Tran Type'],
+                row['Withdrawals'],
                 personal_rules
             ),
             axis=1
         )
 
-        output_df = pd.DataFrame({
-            'Date':             expense_df['Value Date_Clean'],
-            'Particulars':      expense_df[particulars_col],
-            'Transaction Type': expense_df[tran_type_col] if tran_type_col else 'N/A',
-            'Category':         expense_df['Category'],
-            'Amount':           expense_df['Withdrawal_Clean']
+        # Rename for consistency with rest of app
+        expense_df = expense_df.rename(columns={
+            'Withdrawals': 'Amount',
+            'Tran Type':   'Transaction Type'
         })
 
-        return output_df
+        return expense_df[['Date', 'Particulars', 'Transaction Type', 'Category', 'Amount']]
 
     except Exception as e:
-        st.error(f"Error processing file: {str(e)}")
+        st.error(f"""
+        ❌ Error processing file: {str(e)}
+
+        **Please make sure:**
+        - File is a valid Excel file (.xlsx or .xls)
+        - File is a bank statement with transaction data
+        - File has columns for Date, Description/Particulars, and Withdrawal/Debit amounts
+        """)
         return None
 
 
 # ============================================================================
-# SUMMARY HELPERS
-# ============================================================================
-
-def get_category_summary(df):
-    """Calculate total spending and transaction count per category."""
-    summary = df.groupby('Category')['Amount'].agg(['sum', 'count']).reset_index()
-    summary.columns = ['Category', 'Total', 'Count']
-    summary = summary.sort_values('Total', ascending=False)
-    summary['Percentage'] = (summary['Total'] / summary['Total'].sum() * 100).round(1)
-    return summary
-
-
-def get_available_categories():
-    """Get all category names for the dropdown selector."""
-    return sorted(CATEGORY_KEYWORDS.keys())
-
-
-# ============================================================================
-# PDF REPORT GENERATION
+# PDF GENERATION — kept exactly from original
 # ============================================================================
 
 def generate_pdf_report(df, category_summary):
     """
-    Generate a two-page PDF report:
-    Page 1 — summary stats + pie chart
-    Page 2 — bar chart + category breakdown table
+    Generate a professional PDF report with summary and charts.
+    Returns BytesIO: PDF file in memory.
     """
     from matplotlib.backends.backend_pdf import PdfPages
     import matplotlib.pyplot as plt
     from matplotlib.patches import Rectangle
 
     pdf_buffer = BytesIO()
-    total_spent       = df['Amount'].sum()
-    total_transactions = len(df)
-
     with PdfPages(pdf_buffer) as pdf:
-        # Page 1: Summary + Pie
+
+        # PAGE 1: SUMMARY + PIE CHART
         fig = plt.figure(figsize=(8.5, 11))
         fig.patch.set_facecolor('white')
+
         fig.text(0.5, 0.96, 'EXPENSE REPORT', ha='center', fontsize=22, weight='bold')
-        fig.text(0.5, 0.93, f'Generated on {datetime.now().strftime("%B %d, %Y")}',
+        report_date = datetime.now().strftime('%B %d, %Y')
+        fig.text(0.5, 0.93, f'Generated on {report_date}',
                  ha='center', fontsize=11, style='italic', color='#666666')
 
+        line1 = Rectangle((0.1, 0.915), 0.8, 0.002, transform=fig.transFigure, color='#CCCCCC')
+        fig.patches.append(line1)
+
+        summary_y = 0.88
+        fig.text(0.5, summary_y, 'SUMMARY', ha='center', fontsize=14, weight='bold')
+
+        total_spent        = df['Amount'].sum()
+        total_transactions = len(df)
+        uncategorized      = len(df[df['Category'] == 'Miscellaneous'])
+        n_months           = df['Date'].dt.to_period('M').nunique()
+        avg_monthly        = total_spent / n_months if n_months > 0 else total_spent
+
         summary_items = [
-            ('Total Spent',       f'₹{total_spent:,.2f}'),
-            ('Total Transactions', f'{total_transactions:,}'),
-            ('Uncategorized',     f'{len(df[df["Category"] == "Uncategorized"])}'),
-            ('Avg Transaction',   f'₹{df["Amount"].mean():,.2f}'),
+            ('Total Spent',         f'₹{total_spent:,.2f}'),
+            ('Total Transactions',  f'{total_transactions:,}'),
+            ('Months Covered',      f'{n_months}'),
+            ('Average per Month',   f'₹{avg_monthly:,.0f}'),
+            ('Miscellaneous Items', f'{uncategorized}'),
         ]
-        box_y = 0.85
+
+        box_y = summary_y - 0.03
         for label, value in summary_items:
-            box = Rectangle((0.15, box_y - 0.025), 0.7, 0.03, transform=fig.transFigure,
+            box = Rectangle((0.15, box_y - 0.025), 0.7, 0.03,
+                             transform=fig.transFigure,
                              facecolor='#F5F5F5', edgecolor='#E0E0E0', linewidth=0.5)
             fig.patches.append(box)
             fig.text(0.18, box_y, f'{label}:', fontsize=11, va='center', ha='left')
             fig.text(0.55, box_y, value, fontsize=11, weight='bold', ha='left', va='center')
             box_y -= 0.04
 
-        ax_pie = fig.add_axes([0.15, 0.25, 0.7, 0.45])
+        ax_pie = fig.add_axes([0.15, 0.25, 0.7, 0.38])
         colors = [CATEGORY_COLORS.get(cat, '#CCCCCC') for cat in category_summary['Category']]
         wedges, texts, autotexts = ax_pie.pie(
-            category_summary['Total'], labels=None, autopct='%1.1f%%',
-            colors=colors, startangle=90, pctdistance=0.85
+            category_summary['Total'],
+            labels=None,
+            autopct='%1.1f%%',
+            colors=colors,
+            startangle=90,
+            pctdistance=0.85
         )
-        for at in autotexts:
-            at.set_color('white'); at.set_fontsize(9); at.set_weight('bold')
+        for autotext in autotexts:
+            autotext.set_color('white')
+            autotext.set_fontsize(9)
+            autotext.set_weight('bold')
         ax_pie.legend(category_summary['Category'], loc='upper center',
                       bbox_to_anchor=(0.5, -0.05), ncol=3, frameon=False, fontsize=9)
         ax_pie.set_title('Spending by Category', fontsize=13, weight='bold', pad=15)
-        pdf.savefig(fig, bbox_inches='tight')
-        plt.close()
-
-        # Page 2: Bar + Table
-        fig = plt.figure(figsize=(8.5, 11))
-        fig.patch.set_facecolor('white')
-        fig.text(0.5, 0.96, 'CATEGORY BREAKDOWN', ha='center', fontsize=18, weight='bold')
-
-        ax_bar = fig.add_axes([0.2, 0.65, 0.7, 0.25])
-        top_cats   = category_summary.head(10)
-        colors_bar = [CATEGORY_COLORS.get(c, '#CCCCCC') for c in top_cats['Category']]
-        bars = ax_bar.barh(range(len(top_cats)), top_cats['Total'], color=colors_bar, height=0.7)
-        ax_bar.set_yticks(range(len(top_cats)))
-        ax_bar.set_yticklabels(top_cats['Category'], fontsize=10)
-        ax_bar.invert_yaxis()
-        ax_bar.set_xlabel('Amount (₹)', fontsize=11, weight='bold')
-        ax_bar.set_title('Top Spending Categories', fontsize=13, weight='bold', pad=15)
-        ax_bar.grid(axis='x', alpha=0.3, linestyle='--', linewidth=0.5)
-        ax_bar.spines['top'].set_visible(False)
-        ax_bar.spines['right'].set_visible(False)
-        for bar, value in zip(bars, top_cats['Total']):
-            ax_bar.text(bar.get_width() + max(top_cats['Total']) * 0.01,
-                        bar.get_y() + bar.get_height() / 2,
-                        f'₹{value:,.0f}', ha='left', va='center', fontsize=9, weight='bold')
-
+        fig.text(0.5, 0.03, 'Expense Tracker - Your Financial Insights',
+                 ha='center', fontsize=9, style='italic', color='#999999')
         pdf.savefig(fig, bbox_inches='tight')
         plt.close()
 
@@ -527,7 +563,25 @@ def generate_pdf_report(df, category_summary):
 
 
 # ============================================================================
-# STREAMLIT PAGE CONFIG
+# HELPER FUNCTIONS
+# ============================================================================
+
+def get_category_summary(df):
+    """Calculate spending summary by category, sorted by amount."""
+    summary = df.groupby('Category')['Amount'].agg(['sum', 'count']).reset_index()
+    summary.columns = ['Category', 'Total', 'Count']
+    summary = summary.sort_values('Total', ascending=False)
+    summary['Percentage'] = (summary['Total'] / summary['Total'].sum() * 100).round(1)
+    return summary
+
+
+def get_available_categories():
+    """Get list of all available categories for dropdown."""
+    return sorted(CATEGORY_KEYWORDS.keys())
+
+
+# ============================================================================
+# PAGE CONFIG
 # ============================================================================
 
 st.set_page_config(
@@ -539,30 +593,36 @@ st.set_page_config(
 
 st.markdown("""
 <style>
+.main { padding: 2rem; }
 .block-container { padding-top: 2rem; padding-bottom: 2rem; }
 [data-testid="stMetricValue"] { font-size: 2rem; font-weight: 600; }
+h1 { font-weight: 600; margin-bottom: 2rem; }
+h2 { font-weight: 500; margin-top: 2rem; margin-bottom: 1rem; }
+.dataframe { font-size: 0.9rem; }
+.stButton button { width: 100%; }
 </style>
 """, unsafe_allow_html=True)
 
+
 # ============================================================================
-# SESSION STATE INITIALIZATION
+# SESSION STATE
 # ============================================================================
 
 for key, default in {
-    "df": None,
+    "df":                None,
     "edited_categories": {},
-    "user_info": None,
-    "credentials": None,
-    "personal_rules": {},
-    "rules_saved": False,
-    "oauth_state": None,
+    "user_info":         None,
+    "credentials":       None,
+    "personal_rules":    {},
+    "oauth_state":       None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
 
+
 # ============================================================================
 # HANDLE GOOGLE OAUTH CALLBACK
-# Streamlit re-runs when the URL changes, so we catch the ?code= param here
+# Streamlit re-runs when URL changes — catch the ?code= param here
 # ============================================================================
 
 query_params = st.query_params
@@ -571,50 +631,45 @@ if "code" in query_params and st.session_state.credentials is None:
     with st.spinner("Completing login..."):
         creds = exchange_code_for_credentials(code)
         if creds:
-            st.session_state.credentials = credentials_to_dict(creds)
-            st.session_state.user_info   = get_user_info(creds)
-            # Load personal rules from Drive immediately after login
+            st.session_state.credentials   = credentials_to_dict(creds)
+            st.session_state.user_info     = get_user_info(creds)
             service = get_drive_service(creds)
             st.session_state.personal_rules = load_rules_from_drive(service)
-            rules_count = len(st.session_state.personal_rules)
-            st.success(f"Logged in! Loaded {rules_count} personal rule{'s' if rules_count != 1 else ''}.")
-    # Clean the URL
+            n = len(st.session_state.personal_rules)
+            st.success(f"Logged in! Loaded {n} personal rule{'s' if n != 1 else ''}.")
     st.query_params.clear()
     st.rerun()
 
-# ============================================================================
-# HEADER: LOGIN STATUS
-# ============================================================================
 
-st.title("💰 Expense Tracker")
+# ============================================================================
+# HEADER — title left, login button right
+# ============================================================================
 
 col_title, col_login = st.columns([3, 1])
 
+with col_title:
+    st.title("💰 Expense Tracker")
+
 with col_login:
     if st.session_state.credentials is None:
-        # Not logged in — show login button
         if GOOGLE_CLIENT_ID:
             auth_url = get_google_auth_url()
-            st.markdown(
-                f'<a href="{auth_url}" target="_self">'
-                f'<button style="background:#4285F4;color:white;border:none;padding:8px 16px;'
-                f'border-radius:4px;cursor:pointer;font-size:14px;width:100%">'
-                f'🔐 Sign in with Google</button></a>',
-                unsafe_allow_html=True
-            )
+            st.link_button("🔐 Sign in with Google", auth_url, use_container_width=True)
             st.caption("Sign in to save your category rules")
         else:
             st.warning("Google login not configured")
     else:
-        # Logged in — show user info and logout
         user = st.session_state.user_info or {}
         st.success(f"✅ {user.get('name', 'Signed in')}")
-        rules_count = len(st.session_state.personal_rules)
-        st.caption(f"{rules_count} personal rule{'s' if rules_count != 1 else ''} loaded")
+        n = len(st.session_state.personal_rules)
+        st.caption(f"{n} personal rule{'s' if n != 1 else ''} loaded")
         if st.button("Sign out", use_container_width=True):
-            for key in ["credentials", "user_info", "personal_rules", "df", "edited_categories"]:
-                st.session_state[key] = None if key in ["credentials", "user_info", "df"] else {}
+            for k in ["credentials", "user_info", "df"]:
+                st.session_state[k] = None
+            st.session_state.personal_rules    = {}
+            st.session_state.edited_categories = {}
             st.rerun()
+
 
 # ============================================================================
 # FILE UPLOAD
@@ -628,7 +683,7 @@ if st.session_state.credentials is None:
 uploaded_file = st.file_uploader(
     "Upload Bank Statement (Excel)",
     type=['xlsx', 'xls'],
-    help="Upload your bank statement. Supports most Indian bank formats."
+    help="Upload your bank statement. Supports single-month and multi-month files from any Indian bank."
 )
 
 if uploaded_file is not None:
@@ -636,78 +691,115 @@ if uploaded_file is not None:
         with st.spinner("Processing transactions..."):
             st.session_state.df = load_and_process_statement(
                 uploaded_file,
-                st.session_state.personal_rules  # Pass personal rules to categorizer
+                st.session_state.personal_rules
             )
-            st.session_state.last_upload = uploaded_file.name
+            st.session_state.last_upload       = uploaded_file.name
             st.session_state.edited_categories = {}
 
     if st.session_state.df is not None:
+        n_months = st.session_state.df['Date'].dt.to_period('M').nunique()
         personal_applied = sum(
             1 for row in st.session_state.df.itertuples()
             if apply_personal_rules(row.Particulars, st.session_state.personal_rules) is not None
         )
-        msg = f"✅ Processed {len(st.session_state.df)} transactions"
+        msg = f"✅ Processed {len(st.session_state.df)} transactions across {n_months} month(s)"
         if personal_applied > 0:
-            msg += f" — {personal_applied} categorized using your personal rules"
+            msg += f" — {personal_applied} categorized by your personal rules"
         st.success(msg)
+    else:
+        st.error("❌ Failed to process file. Please check the format and try again.")
+
 
 # ============================================================================
-# MAIN TABS (only shown when data is loaded)
+# MAIN TABS
 # ============================================================================
 
 if st.session_state.df is not None:
     df = st.session_state.df.copy()
 
-    # Apply any manual edits made this session
+    # Apply any manual category edits from the Fix Categories tab
     for idx, new_category in st.session_state.edited_categories.items():
         df.loc[idx, 'Category'] = new_category
 
     st.markdown("---")
-    tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "📋 All Transactions", "✏️ Fix Categories"])
+
+    # Build tab list — Monthly Analysis only appears if module is available
+    if MULTI_MONTH_AVAILABLE:
+        tab1, tab2, tab3, tab4 = st.tabs([
+            "📊 Dashboard",
+            "📅 Monthly Analysis",
+            "📋 All Transactions",
+            "✏️ Fix Categories"
+        ])
+    else:
+        tab1, tab3, tab4 = st.tabs([
+            "📊 Dashboard",
+            "📋 All Transactions",
+            "✏️ Fix Categories"
+        ])
+        tab2 = None
 
     # ========================================================================
     # TAB 1: DASHBOARD
     # ========================================================================
+
     with tab1:
         st.header("Spending Overview")
 
-        total_spent       = df['Amount'].sum()
+        n_months           = df['Date'].dt.to_period('M').nunique()
+        total_spent        = df['Amount'].sum()
         total_transactions = len(df)
-        uncategorized_count = len(df[df['Category'] == 'Uncategorized'])
-        avg_transaction   = df['Amount'].mean()
+        uncategorized_count = len(df[df['Category'] == 'Miscellaneous'])
+        avg_per_month      = total_spent / n_months if n_months > 0 else total_spent
 
         col1, col2, col3, col4 = st.columns(4)
-        with col1: st.metric("Total Spent",     f"₹{total_spent:,.0f}")
-        with col2: st.metric("Transactions",    f"{total_transactions:,}")
-        with col3: st.metric("Uncategorized",   f"{uncategorized_count}")
-        with col4: st.metric("Avg Transaction", f"₹{avg_transaction:,.0f}")
+        with col1: st.metric("Total Spent",   f"₹{total_spent:,.0f}")
+        with col2: st.metric("Transactions",  f"{total_transactions:,}")
+        with col3: st.metric("Avg per Month", f"₹{avg_per_month:,.0f}")
+        with col4: st.metric("Miscellaneous", f"{uncategorized_count}")
+
+        if n_months > 1:
+            st.caption(f"Aggregate across {n_months} months of data")
 
         st.markdown("---")
 
-        category_summary = get_category_summary(df)
         col1, col2 = st.columns(2)
+        category_summary = get_category_summary(df)
 
         with col1:
             st.subheader("Spending by Category")
             fig_pie = px.pie(
-                category_summary, values='Total', names='Category',
-                color='Category', color_discrete_map=CATEGORY_COLORS, hole=0.4
+                category_summary,
+                values='Total',
+                names='Category',
+                color='Category',
+                color_discrete_map=CATEGORY_COLORS,
+                hole=0.4
             )
             fig_pie.update_traces(textposition='inside', textinfo='percent+label')
-            fig_pie.update_layout(showlegend=False, height=400, margin=dict(t=20, b=20, l=20, r=20))
+            fig_pie.update_layout(
+                showlegend=False, height=400,
+                margin=dict(t=20, b=20, l=20, r=20)
+            )
             st.plotly_chart(fig_pie, use_container_width=True)
 
         with col2:
             st.subheader("Top Categories")
             top_categories = category_summary.head(8)
             fig_bar = px.bar(
-                top_categories, x='Total', y='Category', orientation='h',
-                color='Category', color_discrete_map=CATEGORY_COLORS, text='Total'
+                top_categories,
+                x='Total', y='Category',
+                orientation='h',
+                color='Category',
+                color_discrete_map=CATEGORY_COLORS,
+                text='Total'
             )
             fig_bar.update_traces(texttemplate='₹%{text:,.0f}', textposition='outside')
-            fig_bar.update_layout(showlegend=False, height=400,
-                                  margin=dict(t=20, b=20, l=20, r=60),
-                                  xaxis_title="Amount (₹)", yaxis_title="")
+            fig_bar.update_layout(
+                showlegend=False, height=400,
+                margin=dict(t=20, b=20, l=20, r=60),
+                xaxis_title="Amount (₹)", yaxis_title=""
+            )
             st.plotly_chart(fig_bar, use_container_width=True)
 
         st.markdown("---")
@@ -717,14 +809,15 @@ if st.session_state.df is not None:
         summary_display['Percentage'] = summary_display['Percentage'].apply(lambda x: f"{x}%")
         st.dataframe(summary_display, hide_index=True, use_container_width=True)
 
-        # Downloads
         st.markdown("---")
         st.subheader("💾 Download Your Report")
+
         col1, col2 = st.columns(2)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         with col1:
-            st.markdown("**📊 Excel**")
+            st.markdown("**📊 Detailed Data (Excel)**")
+            st.write("All transactions with categories")
             output = BytesIO()
             df.to_excel(output, index=False, engine='openpyxl')
             st.download_button(
@@ -736,16 +829,17 @@ if st.session_state.df is not None:
             )
 
         with col2:
-            st.markdown("**📄 PDF Report**")
+            st.markdown("**📄 Summary Report (PDF)**")
+            st.write("Charts and category breakdown")
             if st.button("🔄 Generate PDF", use_container_width=True, type="secondary"):
-                with st.spinner("Creating PDF..."):
+                with st.spinner("Creating PDF report..."):
                     try:
                         pdf_data = generate_pdf_report(df, category_summary)
                         st.session_state.pdf_data     = pdf_data.getvalue()
                         st.session_state.pdf_filename = f"expense_report_{timestamp}.pdf"
                         st.success("✅ PDF ready!")
                     except Exception as e:
-                        st.error(f"PDF error: {str(e)}")
+                        st.error(f"❌ Error generating PDF: {str(e)}")
             if 'pdf_data' in st.session_state:
                 st.download_button(
                     label="📥 Download PDF",
@@ -756,27 +850,39 @@ if st.session_state.df is not None:
                 )
 
     # ========================================================================
-    # TAB 2: ALL TRANSACTIONS
+    # TAB 2: MONTHLY ANALYSIS (original module, unchanged)
     # ========================================================================
-    with tab2:
+
+    if MULTI_MONTH_AVAILABLE and tab2 is not None:
+        with tab2:
+            render_monthly_analysis_tab(df)
+
+    # ========================================================================
+    # TAB 3: ALL TRANSACTIONS
+    # ========================================================================
+
+    with tab3:
         st.header("All Transactions")
 
         col1, col2, col3 = st.columns([2, 2, 2])
         with col1:
-            categories    = ['All'] + sorted(df['Category'].unique().tolist())
-            selected_cat  = st.selectbox("Filter by Category", categories)
+            categories        = ['All'] + sorted(df['Category'].unique().tolist())
+            selected_category = st.selectbox("Filter by Category", categories)
         with col2:
             if not df['Date'].isna().all():
                 min_date   = df['Date'].min()
                 max_date   = df['Date'].max()
-                date_range = st.date_input("Date Range", value=(min_date, max_date),
-                                           min_value=min_date, max_value=max_date)
+                date_range = st.date_input(
+                    "Date Range",
+                    value=(min_date, max_date),
+                    min_value=min_date, max_value=max_date
+                )
         with col3:
             search_term = st.text_input("Search Particulars", "")
 
         filtered_df = df.copy()
-        if selected_cat != 'All':
-            filtered_df = filtered_df[filtered_df['Category'] == selected_cat]
+        if selected_category != 'All':
+            filtered_df = filtered_df[filtered_df['Category'] == selected_category]
         if search_term:
             filtered_df = filtered_df[
                 filtered_df['Particulars'].str.contains(search_term, case=False, na=False)
@@ -795,27 +901,35 @@ if st.session_state.df is not None:
         st.dataframe(display_df, hide_index=True, use_container_width=True, height=500)
 
     # ========================================================================
-    # TAB 3: FIX CATEGORIES (with learning)
+    # TAB 4: FIX CATEGORIES (with learning)
     # ========================================================================
-    with tab3:
+
+    with tab4:
         st.header("Fix Categories")
 
         if st.session_state.credentials:
-            st.info("✨ Any correction you make here will be remembered for future uploads.")
+            st.info("✨ Every correction you make here is remembered for future uploads.")
         else:
             st.warning("⚠️ Sign in with Google to save your corrections between sessions.")
 
-        needs_review = df[df['Category'].isin(['Uncategorized', 'Miscellaneous'])].copy()
+        needs_review = df[df['Category'] == 'Miscellaneous'].copy()
 
         if len(needs_review) == 0:
             st.success("🎉 All transactions are categorized!")
         else:
-            st.markdown(f"**{len(needs_review)} transactions need review**")
-            show_filter = st.radio("Show:", ["Uncategorized only", "Miscellaneous only", "Both"], horizontal=True)
-            if show_filter == "Uncategorized only":
-                needs_review = needs_review[needs_review['Category'] == 'Uncategorized']
-            elif show_filter == "Miscellaneous only":
-                needs_review = needs_review[needs_review['Category'] == 'Miscellaneous']
+            st.info(f"📝 {len(needs_review)} transactions in Miscellaneous — review and reassign if needed")
+
+            show_filter = st.radio(
+                "Show:",
+                ["All Miscellaneous", "Only those I haven't reviewed"],
+                horizontal=True
+            )
+            if show_filter == "Only those I haven't reviewed":
+                reviewed_indices = set(st.session_state.edited_categories.keys())
+                needs_review = needs_review[~needs_review.index.isin(reviewed_indices)]
+
+            st.markdown(f"**Reviewing {len(needs_review)} transactions**")
+            st.markdown("---")
 
             available_categories = get_available_categories()
 
@@ -823,20 +937,23 @@ if st.session_state.df is not None:
                 with st.container():
                     col1, col2 = st.columns([3, 1])
                     with col1:
-                        st.markdown(f"**{row['Particulars']}**")
-                        st.markdown(f"₹{row['Amount']:,.2f} · {row['Date'].strftime('%d-%b-%Y')} · {row['Transaction Type']}")
-                        st.caption(f"Current: {row['Category']}")
+                        st.markdown(f"**Date:** {row['Date'].strftime('%d-%b-%Y')}")
+                        st.markdown(f"**Amount:** ₹{row['Amount']:,.2f}")
+                        st.markdown(f"**Type:** {row['Transaction Type']}")
+                        st.markdown(f"**Details:** {row['Particulars']}")
+                        st.markdown(f"*Current: {row['Category']}*")
                     with col2:
                         current_cat = st.session_state.edited_categories.get(idx, row['Category'])
                         new_cat = st.selectbox(
                             "Category",
                             available_categories,
-                            index=available_categories.index(current_cat) if current_cat in available_categories else 0,
+                            index=available_categories.index(current_cat)
+                            if current_cat in available_categories else 0,
                             key=f"cat_{idx}"
                         )
                         if new_cat != row['Category']:
                             if st.button("✓ Save", key=f"btn_{idx}", type="primary"):
-                                # Record the edit for this session
+                                # Record edit for this session
                                 st.session_state.edited_categories[idx] = new_cat
 
                                 # Learn from this correction
@@ -863,13 +980,13 @@ if st.session_state.df is not None:
                 st.success(f"✅ {len(st.session_state.edited_categories)} corrections made this session")
 
 else:
-    # Welcome screen
     st.info("👆 Upload a bank statement to get started")
-    st.markdown("### What this app does")
+    st.markdown("### Features")
     st.markdown("""
-    - **Reads** your bank statement Excel file
-    - **Categorizes** every transaction automatically
-    - **Learns** from your corrections — sign in with Google to remember them forever
-    - **Shows** your spending breakdown with charts
-    - **Downloads** your processed data as Excel or PDF
+    - 📊 **Visual Dashboard** — Aggregate spending breakdown across all months
+    - 📅 **Monthly Analysis** — Compare spending month by month, spot unusual spikes
+    - 📋 **Transaction Table** — Filter, search, and review all transactions
+    - ✏️ **Fix Categories** — Correct wrong categories; app learns your preferences
+    - 🔐 **Sign in with Google** — Your corrections are saved and applied automatically next time
+    - 💾 **Download Reports** — Excel and PDF exports
     """)
