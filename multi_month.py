@@ -120,6 +120,233 @@ def _apply_edits(df):
     return df
 
 
+
+# ============================================================================
+# REPORT GENERATORS
+# ============================================================================
+
+def generate_monthly_excel(df, months, pivot):
+    """
+    Generate an Excel file with:
+    - Sheet 1: Category x Month summary table
+    - One sheet per month with all transactions for that month
+    Returns bytes ready for st.download_button.
+    """
+    from io import BytesIO
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
+    df = df.copy()
+    df['Month'] = df['Date'].dt.strftime('%b %Y')
+
+    output = BytesIO()
+    wb = openpyxl.Workbook()
+
+    # ── Sheet 1: Summary ──────────────────────────────────────────────────────
+    ws = wb.active
+    ws.title = "Summary"
+
+    header_fill = PatternFill("solid", fgColor="2196F3")
+    header_font = Font(color="FFFFFF", bold=True)
+    bold = Font(bold=True)
+
+    # Write header
+    ws.cell(1, 1, "Category").font = header_font
+    ws.cell(1, 1).fill = header_fill
+    for i, month in enumerate(months):
+        cell = ws.cell(1, i + 2, month)
+        cell.font = header_font
+        cell.fill = header_fill
+    total_col = len(months) + 2
+    ws.cell(1, total_col, "Total").font = header_font
+    ws.cell(1, total_col).fill = header_fill
+
+    # Write category rows
+    for r, category in enumerate(pivot.index, start=2):
+        ws.cell(r, 1, category)
+        for i, month in enumerate(months):
+            val = pivot.loc[category, month]
+            ws.cell(r, i + 2, round(val, 0))
+        ws.cell(r, total_col, round(pivot.loc[category, 'Total'], 0))
+
+    # Totals row
+    total_row = len(pivot) + 2
+    ws.cell(total_row, 1, "TOTAL").font = bold
+    for i, month in enumerate(months):
+        ws.cell(total_row, i + 2, round(pivot[month].sum(), 0)).font = bold
+    ws.cell(total_row, total_col, round(pivot['Total'].sum(), 0)).font = bold
+
+    # Column widths
+    ws.column_dimensions['A'].width = 26
+    for i in range(len(months) + 1):
+        ws.column_dimensions[get_column_letter(i + 2)].width = 14
+
+    # ── One sheet per month ────────────────────────────────────────────────────
+    for month in months:
+        month_df = df[df['Month'] == month].sort_values('Date')
+        ws2 = wb.create_sheet(title=month)
+
+        # Header
+        headers = ['Date', 'Description', 'Type', 'Category', 'Amount']
+        for i, h in enumerate(headers, 1):
+            cell = ws2.cell(1, i, h)
+            cell.font = header_font
+            cell.fill = header_fill
+
+        # Transactions
+        for r, (_, row) in enumerate(month_df.iterrows(), start=2):
+            parts = str(row['Particulars']).split('/')
+            note = parts[3].strip() if len(parts) > 3 and parts[3].strip() not in ['','0000'] else ''
+            desc = note if note else (parts[2].strip() if len(parts) > 2 else str(row['Particulars'])[:40])
+            ws2.cell(r, 1, row['Date'].strftime('%d %b %Y'))
+            ws2.cell(r, 2, desc[:45])
+            ws2.cell(r, 3, str(row['Transaction Type']).strip())
+            ws2.cell(r, 4, row['Category'])
+            ws2.cell(r, 5, round(row['Amount'], 0))
+
+        # Total row
+        total_r = len(month_df) + 2
+        ws2.cell(total_r, 4, "TOTAL").font = bold
+        ws2.cell(total_r, 5, round(month_df['Amount'].sum(), 0)).font = bold
+
+        # Widths
+        ws2.column_dimensions['A'].width = 14
+        ws2.column_dimensions['B'].width = 32
+        ws2.column_dimensions['C'].width = 10
+        ws2.column_dimensions['D'].width = 24
+        ws2.column_dimensions['E'].width = 12
+
+    wb.save(output)
+    return output.getvalue()
+
+
+def generate_monthly_pdf(df, months, pivot, flags):
+    """
+    Generate a PDF summary report with:
+    - Category x Month table
+    - Monthly totals
+    - Attention flags
+    Returns bytes ready for st.download_button.
+    """
+    from io import BytesIO
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.units import cm
+    from reportlab.platypus import (
+        SimpleDocTemplate, Table, TableStyle, Paragraph,
+        Spacer, HRFlowable
+    )
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+    from datetime import datetime
+
+    output = BytesIO()
+    doc = SimpleDocTemplate(
+        output, pagesize=A4,
+        leftMargin=1.5*cm, rightMargin=1.5*cm,
+        topMargin=1.5*cm, bottomMargin=1.5*cm
+    )
+
+    styles = getSampleStyleSheet()
+    title_style  = ParagraphStyle('title',  fontSize=16, fontName='Helvetica-Bold', spaceAfter=6)
+    sub_style    = ParagraphStyle('sub',    fontSize=11, fontName='Helvetica-Bold', spaceAfter=4, spaceBefore=12)
+    caption_style= ParagraphStyle('cap',    fontSize=8,  fontName='Helvetica',      textColor=colors.grey, spaceAfter=6)
+    flag_style   = ParagraphStyle('flag',   fontSize=9,  fontName='Helvetica',      spaceAfter=4)
+
+    blue  = colors.HexColor('#2196F3')
+    light = colors.HexColor('#E3F2FD')
+    red   = colors.HexColor('#F44336')
+    orange= colors.HexColor('#FF9800')
+    amber = colors.HexColor('#FFC107')
+
+    story = []
+
+    # Title
+    story.append(Paragraph("Monthly Expense Report", title_style))
+    period = f"{months[0]} — {months[-1]}"
+    story.append(Paragraph(f"{period}  ·  Generated {datetime.now().strftime('%d %b %Y')}", caption_style))
+    story.append(HRFlowable(width="100%", thickness=1, color=colors.lightgrey, spaceAfter=10))
+
+    # ── Summary table ──────────────────────────────────────────────────────────
+    story.append(Paragraph("Category Breakdown", sub_style))
+
+    header = ['Category'] + months + ['Total']
+    table_data = [header]
+    for category in pivot.index:
+        row = [category]
+        for month in months:
+            val = pivot.loc[category, month]
+            row.append(f"Rs{val:,.0f}" if val > 0 else "—")
+        row.append(f"Rs{pivot.loc[category, 'Total']:,.0f}")
+        table_data.append(row)
+
+    # Grand total row
+    grand = ['TOTAL']
+    for month in months:
+        grand.append(f"Rs{pivot[month].sum():,.0f}")
+    grand.append(f"Rs{pivot['Total'].sum():,.0f}")
+    table_data.append(grand)
+
+    col_widths = [4.5*cm] + [2.8*cm] * len(months) + [3*cm]
+    tbl = Table(table_data, colWidths=col_widths, repeatRows=1)
+    tbl.setStyle(TableStyle([
+        ('BACKGROUND',   (0, 0), (-1, 0),              blue),
+        ('TEXTCOLOR',    (0, 0), (-1, 0),              colors.white),
+        ('FONTNAME',     (0, 0), (-1, 0),              'Helvetica-Bold'),
+        ('FONTSIZE',     (0, 0), (-1, -1),             8),
+        ('ALIGN',        (1, 0), (-1, -1),             'RIGHT'),
+        ('ALIGN',        (0, 0), (0, -1),              'LEFT'),
+        ('BACKGROUND',   (0, -1), (-1, -1),            light),
+        ('FONTNAME',     (0, -1), (-1, -1),            'Helvetica-Bold'),
+        ('ROWBACKGROUNDS',(0, 1), (-1, -2),            [colors.white, colors.HexColor('#F5F5F5')]),
+        ('GRID',         (0, 0), (-1, -1),             0.3, colors.lightgrey),
+        ('TOPPADDING',   (0, 0), (-1, -1),             4),
+        ('BOTTOMPADDING',(0, 0), (-1, -1),             4),
+        ('LEFTPADDING',  (0, 0), (-1, -1),             6),
+        ('RIGHTPADDING', (0, 0), (-1, -1),             6),
+    ]))
+    story.append(tbl)
+    story.append(Spacer(1, 0.4*cm))
+
+    # ── Attention flags ───────────────────────────────────────────────────────
+    if flags:
+        story.append(Paragraph("Attention Needed", sub_style))
+        story.append(Paragraph(
+            "Categories where any month is 30%+ above that category's average.",
+            caption_style
+        ))
+
+        flag_data = [['Category', 'Month', 'Spent', 'Average', 'Above avg']]
+        for flag in flags:
+            pct = flag['PctAbove']
+            flag_data.append([
+                flag['Category'],
+                flag['Month'],
+                f"Rs{flag['Amount']:,.0f}",
+                f"Rs{flag['Avg']:,.0f}",
+                f"+{pct}%",
+            ])
+
+        ftbl = Table(flag_data, colWidths=[4.5*cm, 2.5*cm, 2.8*cm, 2.8*cm, 2.5*cm], repeatRows=1)
+        ftbl.setStyle(TableStyle([
+            ('BACKGROUND',   (0, 0), (-1, 0),   blue),
+            ('TEXTCOLOR',    (0, 0), (-1, 0),   colors.white),
+            ('FONTNAME',     (0, 0), (-1, 0),   'Helvetica-Bold'),
+            ('FONTSIZE',     (0, 0), (-1, -1),  8),
+            ('ALIGN',        (2, 0), (-1, -1),  'RIGHT'),
+            ('GRID',         (0, 0), (-1, -1),  0.3, colors.lightgrey),
+            ('ROWBACKGROUNDS',(0,1), (-1,-1),   [colors.white, colors.HexColor('#FFF8E1')]),
+            ('TOPPADDING',   (0, 0), (-1, -1),  4),
+            ('BOTTOMPADDING',(0, 0), (-1, -1),  4),
+            ('LEFTPADDING',  (0, 0), (-1, -1),  6),
+            ('RIGHTPADDING', (0, 0), (-1, -1),  6),
+        ]))
+        story.append(ftbl)
+
+    doc.build(story)
+    return output.getvalue()
+
 # ============================================================================
 # TRANSACTION DRILL-DOWN PANEL
 # ============================================================================
@@ -335,9 +562,8 @@ def render_monthly_analysis_tab(df):
 
     if not flags:
         st.success("✅ No unusual spikes — spending is consistent across months.")
-        return
-
-    cols = st.columns(2)
+    else:
+        cols = st.columns(2)
     for i, flag in enumerate(flags):
         pct = flag['PctAbove']
         if pct >= 80:
@@ -365,3 +591,41 @@ def render_monthly_analysis_tab(df):
             ):
                 st.session_state.drilldown_key = cell_key
                 st.rerun()
+
+    st.markdown("---")
+
+    # ── Section 4: Download monthly report ────────────────────────────────────
+    st.subheader("Download monthly report")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("**Excel — full breakdown**")
+        st.caption("One sheet per month with all transactions")
+        excel_data = generate_monthly_excel(df, months, pivot)
+        st.download_button(
+            label="Download Excel",
+            data=excel_data,
+            file_name=f"monthly_report_{months[0].replace(' ','_')}_{months[-1].replace(' ','_')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
+    with col2:
+        st.markdown("**PDF — summary report**")
+        st.caption("Category totals, bar chart, attention flags")
+        if st.button("Generate PDF", use_container_width=True, type="secondary"):
+            with st.spinner("Creating PDF..."):
+                pdf_data = generate_monthly_pdf(df, months, pivot, flags)
+                st.session_state.monthly_pdf = pdf_data
+                st.session_state.monthly_pdf_name = f"monthly_report_{months[0].replace(' ','_')}_{months[-1].replace(' ','_')}.pdf"
+
+        if 'monthly_pdf' in st.session_state:
+            st.download_button(
+                label="Download PDF",
+                data=st.session_state.monthly_pdf,
+                file_name=st.session_state.monthly_pdf_name,
+                mime="application/pdf",
+                use_container_width=True,
+            )
+

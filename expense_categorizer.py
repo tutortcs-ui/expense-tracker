@@ -78,12 +78,25 @@ CATEGORY_KEYWORDS = {
 
     'Rent': [
         'rent', 'landlord',
-        'kmc', 'kolkata municipal', 'municipality',
+        'kolkata municipal', 'municipality',
         'maintenance', 'society',
+        # Note: KMC municipal tax moved to Family per user correction
     ],
 
     'Family': [
         'family',
+        # Known family members / household purchases for family
+        '6296532234-2@axl',    # household items for family
+        '6296532234@axl',      # household/shopping for family
+        'amazon@yapl',         # amazon purchases for family
+        'q260127764@ybl',      # cutlery/household
+        'q69946794@ybl',       # soap/household
+        'q374724202@ybl',      # bag repair for family
+        'amazon@yapl',         # amazon for family
+        # Household item notes that belong to Family
+        'fan cov', 'cutlery', 'soap', 'bag repai',
+        # Municipal / civic payments treated as family expense
+        'kmc', 'kmc a c',
     ],
 
     'Medical': [
@@ -93,6 +106,14 @@ CATEGORY_KEYWORDS = {
         'scan doct', 'scan doc', 'pastur',
         'pathology', 'lab test', 'apollo', 'fortis',
         'mosquito', 'sanitizer',
+        # Known medical payments
+        '20155456966@sbin0002017.',  # medical payment
+        'minakshipradhan0697@okic',  # medical payment
+        # ATM locations used for medical
+        'midnapore khudiramnaga',    # ATM near medical centre
+        'sbi belda onsite adwm',     # ATM near medical centre
+        'feedar road ariyadaha',     # ATM near medical centre
+        'raz*meesho',                # meesho order = medical supplies
     ],
 
     'Food': [
@@ -125,6 +146,10 @@ CATEGORY_KEYWORDS = {
         'q669543068', 'gpay-12190525019', 'gpay-11244605008',
         'paytm.s10lez0', 'paytm.s1p3egp',
         'hoogafarmspriva', 'ppqr01.rldijp',
+        # Known food vendors learned from corrections
+        'rahulkundu1209-1@okaxis',   # food purchase
+        'shimuldutta209@oksbi',      # food (amr = small food)
+        'bharatpe.9e0n0o0h6c25888',  # food vendor
     ],
 
     'Travel': [
@@ -144,7 +169,7 @@ CATEGORY_KEYWORDS = {
         'subscription', 'membership', 'manda',
         'playstore@axisbank',
         # Mobile and internet
-        'recharge', 'gpayrecharge', 'gpay recharge',
+        'recharge', 'gpay recharge',
         'mobile', 'mobi', 'phone', 'phon',
         'dth', 'airtel', 'jio', 'bsnl', 'vodafone',
         'internet', 'postpaid', 'prepaid',
@@ -169,11 +194,25 @@ CATEGORY_KEYWORDS = {
         'garden', 'plant', 'nursery', 'seed',
         'fertilizer', 'pot', 'soil',
         'wages', 'wage', 'gardener',
+        # Known garden workers/suppliers
+        '7980200630@ptyes',         # post office / garden supplies
+        'dipteshmukherjee123@okic', # garden worker
+        'post of',                  # post office — garden supply payments
     ],
 
+    # ── Learned from user corrections ──────────────────────────────────────────
+    # These UPI IDs were manually corrected and are now permanent rules.
+    # Add new ones here as you correct more transactions.
     'Gifts': [
-        'gift', 'donation', 'charity', 'temple', 'pooja', 'puja',
-        'tithe',
+        'gift', 'donation', 'charity', 'temple', 'pooja', 'puja', 'tithe',
+        # Known people you give gifts/donations to
+        'akchatterjee2005@oksbi',
+        'arnab2k7@oksbi',
+        'sudiptaghosh664@oksbi',
+        'barnalihowlader2000@oksb',
+        'som.mahato2011@okaxis',
+        'akashchatterjeekol-1@oks',
+        'poulami.dutta@okhdfcbank',
     ],
 
     'Miscellaneous': [
